@@ -23,6 +23,7 @@ SESSOES_ATIVAS = {}
 LOGIN_USUARIO = "admin"
 LOGIN_SENHA = "123456"
 
+IS_PROD = os.getenv("ENV", "dev") == "prod"
 
 class LoginPayload(BaseModel):
     usuario: str
@@ -11616,11 +11617,9 @@ async def auth_login(payload: LoginPayload, request: Request, response: Response
     response.set_cookie(
         key="painel_session",
         value=token,
-
         httponly=True,
-        secure=True,
-        samesite="none",
-
+        secure=IS_PROD,
+        samesite="none" if IS_PROD else "lax",
         path="/",
         max_age=60 * 60 * 8,
     )
@@ -11656,8 +11655,8 @@ async def auth_logout(request: Request, response: Response):
     response.delete_cookie(
         "painel_session",
         path="/",
-        secure=True,
-        samesite="none",
+        secure=IS_PROD,
+        samesite="none" if IS_PROD else "lax",
     )
 
     return {"ok": True}
