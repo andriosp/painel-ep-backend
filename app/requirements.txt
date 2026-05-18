@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+asyncpg
+python-dotenv
+python-multipart
+pandas
+openpyxl
+bcrypt
+PyJWT
