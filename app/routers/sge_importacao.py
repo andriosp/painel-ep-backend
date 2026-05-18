@@ -11616,11 +11616,13 @@ async def auth_login(payload: LoginPayload, request: Request, response: Response
     response.set_cookie(
         key="painel_session",
         value=token,
+
         httponly=True,
-        samesite="none",
         secure=True,
+        samesite="none",
+
         path="/",
-        max_age=60 * 60 * 8,  # 8h
+        max_age=60 * 60 * 8,
     )
 
     return {
