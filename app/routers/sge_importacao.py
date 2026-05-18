@@ -11617,9 +11617,10 @@ async def auth_login(payload: LoginPayload, request: Request, response: Response
         key="painel_session",
         value=token,
         httponly=True,
-        samesite="lax",
-        secure=False,
-        path="/"
+        samesite="none",
+        secure=True,
+        path="/",
+        max_age=60 * 60 * 8,  # 8h
     )
 
     return {
@@ -11650,7 +11651,12 @@ async def auth_logout(request: Request, response: Response):
     if token and token in SESSOES_ATIVAS:
         del SESSOES_ATIVAS[token]
 
-    response.delete_cookie("painel_session", path="/")
+    response.delete_cookie(
+        "painel_session",
+        path="/",
+        secure=True,
+        samesite="none",
+    )
 
     return {"ok": True}
 
