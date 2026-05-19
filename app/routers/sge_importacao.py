@@ -11881,9 +11881,10 @@ async def auth_login(payload: LoginPayload, request: Request, response: Response
         key="painel_session",
         value=token,
         httponly=True,
-        secure=is_prod,
+        secure=True if is_prod else False,
         samesite="none" if is_prod else "lax",
         path="/",
+        domain="painel-ep-backend.onrender.com" if is_prod else None,
         max_age=60 * 60 * 8,
     )
 
