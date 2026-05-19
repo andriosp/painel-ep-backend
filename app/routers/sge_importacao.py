@@ -18,8 +18,6 @@ from pydantic import BaseModel
 
 router = APIRouter()
 
-SESSOES_ATIVAS = {}
-
 LOGIN_USUARIO = "admin"
 LOGIN_SENHA = "123456"
 
@@ -11854,17 +11852,11 @@ async def processar_data(request: Request, lote_id: int):
 async def auth_login(payload: LoginPayload, request: Request, response: Response):
     usuario = (payload.usuario or "").strip()
     senha = payload.senha or ""
-
     pool = request.app.state.pool
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            SELECT
-                u.id,
-                u.usuario,
-                u.nome,
-                u.deve_trocar_senha,
-                p.nome AS perfil
+            SELECT u.id, u.usuario, u.nome, u.deve_trocar_senha, p.nome AS perfil
             FROM usuarios u
             JOIN perfis p ON p.id = u.perfil_id
             WHERE u.usuario = $1
@@ -11872,16 +11864,16 @@ async def auth_login(payload: LoginPayload, request: Request, response: Response
               AND u.senha_hash = crypt($2, u.senha_hash)
         """, usuario, senha)
 
-    if not row:
-        raise HTTPException(status_code=401, detail="Usuário ou senha inválidos.")
+        if not row:
+            raise HTTPException(status_code=401, detail="Usuário ou senha inválidos.")
 
-    token = secrets.token_urlsafe(32)
+        token = secrets.token_urlsafe(32)
+        expira_em = datetime.utcnow() + timedelta(hours=8)
 
-    SESSOES_ATIVAS[token] = {
-        "usuario": row["usuario"],
-        "nome": row["nome"],
-        "perfil": row["perfil"]
-    }
+        await conn.execute("""
+            INSERT INTO sessoes_ativas (token, usuario, nome, perfil, expira_em)
+            VALUES ($1, $2, $3, $4, $5)
+        """, token, row["usuario"], row["nome"], row["perfil"], expira_em)
 
     is_prod = os.getenv("ENV", "dev") == "prod"
 
@@ -11908,20 +11900,41 @@ async def auth_login(payload: LoginPayload, request: Request, response: Response
 async def auth_me(request: Request):
     token = request.cookies.get("painel_session")
 
-    if not token or token not in SESSOES_ATIVAS:
+    if not token:
         raise HTTPException(status_code=401, detail="Não autenticado.")
+
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        sessao = await conn.fetchrow("""
+            SELECT usuario, nome, perfil
+            FROM sessoes_ativas
+            WHERE token = $1
+              AND expira_em > NOW()
+        """, token)
+
+    if not sessao:
+        raise HTTPException(status_code=401, detail="Sessão expirada.")
 
     return {
         "ok": True,
-        **SESSOES_ATIVAS[token]
+        "usuario": sessao["usuario"],
+        "nome": sessao["nome"],
+        "perfil": sessao["perfil"]
     }
+
 
 @router.post("/auth/logout")
 async def auth_logout(request: Request, response: Response):
     token = request.cookies.get("painel_session")
+    pool = request.app.state.pool
 
-    if token and token in SESSOES_ATIVAS:
-        del SESSOES_ATIVAS[token]
+    if token:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                DELETE FROM sessoes_ativas
+                WHERE token = $1
+            """, token)
 
     is_prod = os.getenv("ENV", "dev") == "prod"
 
@@ -12008,17 +12021,30 @@ async def auth_redefinir_senha(payload: RedefinirSenhaPayload, request: Request)
 
     return {"ok": True}
 
-def get_usuario_logado(request: Request):
+async def get_usuario_logado(request: Request):
     token = request.cookies.get("painel_session")
 
-    if not token or token not in SESSOES_ATIVAS:
+    if not token:
         raise HTTPException(status_code=401, detail="Não autenticado.")
 
-    return SESSOES_ATIVAS[token]
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        sessao = await conn.fetchrow("""
+            SELECT usuario, nome, perfil
+            FROM sessoes_ativas
+            WHERE token = $1
+              AND expira_em > NOW()
+        """, token)
+
+    if not sessao:
+        raise HTTPException(status_code=401, detail="Sessão expirada.")
+
+    return dict(sessao)
 
 @router.post("/auth/alterar-senha")
 async def auth_alterar_senha(payload: AlterarSenhaPayload, request: Request):
-    usuario_logado = get_usuario_logado(request)
+    usuario_logado = await get_usuario_logado(request)
 
     senha_atual = payload.senha_atual
     nova_senha = payload.nova_senha
@@ -12051,7 +12077,7 @@ async def auth_alterar_senha(payload: AlterarSenhaPayload, request: Request):
 
 @router.get("/auth/reset-solicitacoes")
 async def auth_reset_solicitacoes(request: Request):
-    usuario_logado = get_usuario_logado(request)
+    usuario_logado = await get_usuario_logado(request)
 
     if usuario_logado["perfil"] != "admin":
         raise HTTPException(status_code=403, detail="Acesso negado.")
@@ -12097,7 +12123,7 @@ async def auth_reset_solicitacoes_atender(
     payload: ResetSolicitacaoAtenderPayload,
     request: Request
 ):
-    usuario_logado = get_usuario_logado(request)
+    usuario_logado = await get_usuario_logado(request)
 
     if usuario_logado["perfil"] != "admin":
         raise HTTPException(status_code=403, detail="Acesso negado.")
@@ -12118,7 +12144,7 @@ async def auth_reset_definir_senha_temporaria(
     payload: ResetDefinirSenhaTemporariaPayload,
     request: Request
 ):
-    usuario_logado = get_usuario_logado(request)
+    usuario_logado = await get_usuario_logado(request)
 
     if usuario_logado["perfil"] != "admin":
         raise HTTPException(status_code=403, detail="Acesso negado.")
@@ -12171,7 +12197,7 @@ async def auth_reset_definir_senha_temporaria(
 
 @router.get("/auth/perfis")
 async def auth_perfis(request: Request):
-    usuario_logado = get_usuario_logado(request)
+    usuario_logado = await get_usuario_logado(request)
 
     if usuario_logado["perfil"] != "admin":
         raise HTTPException(status_code=403, detail="Acesso negado.")
@@ -12200,7 +12226,7 @@ async def auth_perfis(request: Request):
 
 @router.get("/auth/usuarios")
 async def auth_usuarios(request: Request):
-    usuario_logado = get_usuario_logado(request)
+    usuario_logado = await get_usuario_logado(request)
 
     if usuario_logado["perfil"] != "admin":
         raise HTTPException(status_code=403, detail="Acesso negado.")
@@ -12242,7 +12268,7 @@ async def auth_usuarios(request: Request):
 
 @router.post("/auth/usuarios")
 async def auth_criar_usuario(payload: CriarUsuarioPayload, request: Request):
-    usuario_logado = get_usuario_logado(request)
+    usuario_logado = await get_usuario_logado(request)
 
     if usuario_logado["perfil"] != "admin":
         raise HTTPException(status_code=403, detail="Acesso negado.")
@@ -12341,7 +12367,7 @@ async def auth_atualizar_usuario(
     payload: AtualizarUsuarioPayload,
     request: Request
 ):
-    usuario_logado = get_usuario_logado(request)
+    usuario_logado = await get_usuario_logado(request)
 
     if usuario_logado["perfil"] != "admin":
         raise HTTPException(status_code=403, detail="Acesso negado.")
