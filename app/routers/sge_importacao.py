@@ -23,8 +23,6 @@ SESSOES_ATIVAS = {}
 LOGIN_USUARIO = "admin"
 LOGIN_SENHA = "123456"
 
-IS_PROD = os.getenv("ENV", "dev") == "prod"
-
 class LoginPayload(BaseModel):
     usuario: str
     senha: str
@@ -8221,12 +8219,61 @@ async def modalidades_list(
 
     return [dict(r) for r in rows]
 
+@router.get("/modalidades/financiamentos")
+async def modalidades_financiamentos(
+    request: Request,
+    ano: int,
+    meses: str | None = None,
+    modalidades: str | None = None,
+):
+    ids_meses = [
+        int(x) for x in (meses or "").split(",")
+        if x.strip().isdigit()
+    ]
+
+    ids_modalidades = [
+        int(x) for x in (modalidades or "").split(",")
+        if x.strip().isdigit()
+    ]
+
+    filtros = ["rp.ano = $1"]
+    params = [ano]
+
+    if ids_meses:
+        filtros.append(f"rp.mes = ANY(${len(params)+1}::int[])")
+        params.append(ids_meses)
+
+    if ids_modalidades:
+        filtros.append(f"o.cod_modalidade = ANY(${len(params)+1}::int[])")
+        params.append(ids_modalidades)
+
+    where = " AND ".join(filtros)
+
+    sql = f"""
+        SELECT DISTINCT
+            f.codigo,
+            f.nome_financiamento AS financiamento
+        FROM realizado_programas rp
+        JOIN ofertas_programas o
+          ON o.codigo = rp.cod_oferta
+        JOIN financiamento f
+          ON f.codigo = o.cod_financiamento
+        WHERE {where}
+        ORDER BY financiamento
+    """
+
+    async with request.app.state.pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+
+    return [dict(r) for r in rows]
+
 @router.get("/modalidades/summary")
 async def modalidades_summary(
     request: Request,
     ano: int = 2026,
     meses: str | None = None,
     modalidades: str | None = None,
+    financiamentos: str | None = None,
 ):
     pool = request.app.state.pool
 
@@ -8238,12 +8285,20 @@ async def modalidades_summary(
     params = [ano, meses_ids]
     filtro_modalidades = ""
     ids = []
+    filtro_financiamentos = ""
+    ids_fin = []
 
     if modalidades:
         ids = [int(x) for x in modalidades.split(",") if str(x).strip()]
         if ids:
             filtro_modalidades = f" AND o.cod_modalidade = ANY(${len(params)+1}::int[])"
             params.append(ids)
+    
+    if financiamentos:
+        ids_fin = [int(x) for x in financiamentos.split(",") if str(x).strip()]
+        if ids_fin:
+            filtro_financiamentos = f" AND o.cod_financiamento = ANY(${len(params)+1}::int[])"
+            params.append(ids_fin)
 
     sql = f"""
     WITH ofertas_filtradas AS (
@@ -8257,6 +8312,7 @@ async def modalidades_summary(
         ON f.codigo = o.cod_financiamento
         WHERE o.ano = $1
         {filtro_modalidades}
+        {filtro_financiamentos}
     ),
     programas_filtrados AS (
         SELECT DISTINCT
@@ -8265,32 +8321,160 @@ async def modalidades_summary(
     ),
     meta_total AS (
         SELECT
-            COALESCE(SUM(mp.matriculas_meta), 0) AS mat_meta,
-            COALESCE(SUM(mp.ha_meta), 0) AS ha_meta,
-            COALESCE(SUM(mp.receita_meta), 0) AS rec_meta
-        FROM (
-            SELECT DISTINCT cod_oferta
+            COALESCE(SUM(
+                CASE 
+                    WHEN ps.conta = 'MATRÍCULAS' THEN
+                        CASE 
+                            WHEN 1 = ANY($2::int[]) THEN COALESCE(ps.jan, 0) ELSE 0 END +
+                        CASE 
+                            WHEN 2 = ANY($2::int[]) THEN COALESCE(ps.fev, 0) ELSE 0 END +
+                        CASE 
+                            WHEN 3 = ANY($2::int[]) THEN COALESCE(ps.mar, 0) ELSE 0 END +
+                        CASE 
+                            WHEN 4 = ANY($2::int[]) THEN COALESCE(ps.abr, 0) ELSE 0 END +
+                        CASE 
+                            WHEN 5 = ANY($2::int[]) THEN COALESCE(ps.mai, 0) ELSE 0 END +
+                        CASE 
+                            WHEN 6 = ANY($2::int[]) THEN COALESCE(ps.jun, 0) ELSE 0 END +
+                        CASE 
+                            WHEN 7 = ANY($2::int[]) THEN COALESCE(ps.jul, 0) ELSE 0 END +
+                        CASE 
+                            WHEN 8 = ANY($2::int[]) THEN COALESCE(ps.ago, 0) ELSE 0 END +
+                        CASE 
+                            WHEN 9 = ANY($2::int[]) THEN COALESCE(ps.set_, 0) ELSE 0 END +
+                        CASE 
+                            WHEN 10 = ANY($2::int[]) THEN COALESCE(ps.out_, 0) ELSE 0 END +
+                        CASE 
+                            WHEN 11 = ANY($2::int[]) THEN COALESCE(ps.nov, 0) ELSE 0 END +
+                        CASE 
+                            WHEN 12 = ANY($2::int[]) THEN COALESCE(ps.dez, 0) ELSE 0 END
+                    ELSE 0 
+                END
+            ), 0) AS mat_meta,
+
+            COALESCE(SUM(
+                CASE 
+                    WHEN ps.conta = 'HORA-ALUNO' THEN
+                        CASE WHEN 1 = ANY($2::int[]) THEN COALESCE(ps.jan, 0) ELSE 0 END +
+                        CASE WHEN 2 = ANY($2::int[]) THEN COALESCE(ps.fev, 0) ELSE 0 END +
+                        CASE WHEN 3 = ANY($2::int[]) THEN COALESCE(ps.mar, 0) ELSE 0 END +
+                        CASE WHEN 4 = ANY($2::int[]) THEN COALESCE(ps.abr, 0) ELSE 0 END +
+                        CASE WHEN 5 = ANY($2::int[]) THEN COALESCE(ps.mai, 0) ELSE 0 END +
+                        CASE WHEN 6 = ANY($2::int[]) THEN COALESCE(ps.jun, 0) ELSE 0 END +
+                        CASE WHEN 7 = ANY($2::int[]) THEN COALESCE(ps.jul, 0) ELSE 0 END +
+                        CASE WHEN 8 = ANY($2::int[]) THEN COALESCE(ps.ago, 0) ELSE 0 END +
+                        CASE WHEN 9 = ANY($2::int[]) THEN COALESCE(ps.set_, 0) ELSE 0 END +
+                        CASE WHEN 10 = ANY($2::int[]) THEN COALESCE(ps.out_, 0) ELSE 0 END +
+                        CASE WHEN 11 = ANY($2::int[]) THEN COALESCE(ps.nov, 0) ELSE 0 END +
+                        CASE WHEN 12 = ANY($2::int[]) THEN COALESCE(ps.dez, 0) ELSE 0 END
+                    ELSE 0 
+                END
+            ), 0) AS ha_meta,
+
+            COALESCE(SUM(
+                CASE 
+                    WHEN ps.conta = 'RECEITAS CORRENTES' THEN
+                        CASE WHEN 1 = ANY($2::int[]) THEN COALESCE(ps.jan, 0) ELSE 0 END +
+                        CASE WHEN 2 = ANY($2::int[]) THEN COALESCE(ps.fev, 0) ELSE 0 END +
+                        CASE WHEN 3 = ANY($2::int[]) THEN COALESCE(ps.mar, 0) ELSE 0 END +
+                        CASE WHEN 4 = ANY($2::int[]) THEN COALESCE(ps.abr, 0) ELSE 0 END +
+                        CASE WHEN 5 = ANY($2::int[]) THEN COALESCE(ps.mai, 0) ELSE 0 END +
+                        CASE WHEN 6 = ANY($2::int[]) THEN COALESCE(ps.jun, 0) ELSE 0 END +
+                        CASE WHEN 7 = ANY($2::int[]) THEN COALESCE(ps.jul, 0) ELSE 0 END +
+                        CASE WHEN 8 = ANY($2::int[]) THEN COALESCE(ps.ago, 0) ELSE 0 END +
+                        CASE WHEN 9 = ANY($2::int[]) THEN COALESCE(ps.set_, 0) ELSE 0 END +
+                        CASE WHEN 10 = ANY($2::int[]) THEN COALESCE(ps.out_, 0) ELSE 0 END +
+                        CASE WHEN 11 = ANY($2::int[]) THEN COALESCE(ps.nov, 0) ELSE 0 END +
+                        CASE WHEN 12 = ANY($2::int[]) THEN COALESCE(ps.dez, 0) ELSE 0 END
+                    ELSE 0 
+                END
+            ), 0) AS rec_meta
+        FROM planejamento_staging ps
+        WHERE ps.flag_valida = TRUE
+        AND ps.tipo = 'META'
+        AND UPPER(TRIM(ps.financiamento_raw)) IN (
+            SELECT DISTINCT
+                CASE
+                    WHEN financiamento = 'GRATUIDADE NÃO REGIMENTAL' THEN 'GRATUITO'
+                    WHEN financiamento = 'GRATUIDADE REGIMENTAL' THEN 'GRATUIDADE REGIMENTAL'
+                    WHEN financiamento = 'PAGO POR PESSOA FÍSICA OU EMPRESA' THEN 'PAGO'
+                    ELSE financiamento
+                END
             FROM ofertas_filtradas
-        ) of
-        LEFT JOIN meta_programas mp
-            ON mp.cod_oferta = of.cod_oferta
-        AND mp.ano = $1
-        AND mp.mes = ANY($2::int[])
+        )
     ),
 
     proj_total AS (
         SELECT
-            COALESCE(SUM(pp.matriculas_proj), 0) AS mat_proj,
-            COALESCE(SUM(pp.ha_proj), 0) AS ha_proj,
-            COALESCE(SUM(pp.receita_proj), 0) AS rec_proj
-        FROM (
-            SELECT DISTINCT cod_oferta
+            COALESCE(SUM(
+                CASE 
+                    WHEN ps.conta = 'MATRÍCULAS' THEN
+                        CASE WHEN 1 = ANY($2::int[]) THEN COALESCE(ps.jan, 0) ELSE 0 END +
+                        CASE WHEN 2 = ANY($2::int[]) THEN COALESCE(ps.fev, 0) ELSE 0 END +
+                        CASE WHEN 3 = ANY($2::int[]) THEN COALESCE(ps.mar, 0) ELSE 0 END +
+                        CASE WHEN 4 = ANY($2::int[]) THEN COALESCE(ps.abr, 0) ELSE 0 END +
+                        CASE WHEN 5 = ANY($2::int[]) THEN COALESCE(ps.mai, 0) ELSE 0 END +
+                        CASE WHEN 6 = ANY($2::int[]) THEN COALESCE(ps.jun, 0) ELSE 0 END +
+                        CASE WHEN 7 = ANY($2::int[]) THEN COALESCE(ps.jul, 0) ELSE 0 END +
+                        CASE WHEN 8 = ANY($2::int[]) THEN COALESCE(ps.ago, 0) ELSE 0 END +
+                        CASE WHEN 9 = ANY($2::int[]) THEN COALESCE(ps.set_, 0) ELSE 0 END +
+                        CASE WHEN 10 = ANY($2::int[]) THEN COALESCE(ps.out_, 0) ELSE 0 END +
+                        CASE WHEN 11 = ANY($2::int[]) THEN COALESCE(ps.nov, 0) ELSE 0 END +
+                        CASE WHEN 12 = ANY($2::int[]) THEN COALESCE(ps.dez, 0) ELSE 0 END
+                    ELSE 0 
+                END
+            ), 0) AS mat_proj,
+
+            COALESCE(SUM(
+                CASE 
+                    WHEN ps.conta = 'HORA-ALUNO' THEN
+                        CASE WHEN 1 = ANY($2::int[]) THEN COALESCE(ps.jan, 0) ELSE 0 END +
+                        CASE WHEN 2 = ANY($2::int[]) THEN COALESCE(ps.fev, 0) ELSE 0 END +
+                        CASE WHEN 3 = ANY($2::int[]) THEN COALESCE(ps.mar, 0) ELSE 0 END +
+                        CASE WHEN 4 = ANY($2::int[]) THEN COALESCE(ps.abr, 0) ELSE 0 END +
+                        CASE WHEN 5 = ANY($2::int[]) THEN COALESCE(ps.mai, 0) ELSE 0 END +
+                        CASE WHEN 6 = ANY($2::int[]) THEN COALESCE(ps.jun, 0) ELSE 0 END +
+                        CASE WHEN 7 = ANY($2::int[]) THEN COALESCE(ps.jul, 0) ELSE 0 END +
+                        CASE WHEN 8 = ANY($2::int[]) THEN COALESCE(ps.ago, 0) ELSE 0 END +
+                        CASE WHEN 9 = ANY($2::int[]) THEN COALESCE(ps.set_, 0) ELSE 0 END +
+                        CASE WHEN 10 = ANY($2::int[]) THEN COALESCE(ps.out_, 0) ELSE 0 END +
+                        CASE WHEN 11 = ANY($2::int[]) THEN COALESCE(ps.nov, 0) ELSE 0 END +
+                        CASE WHEN 12 = ANY($2::int[]) THEN COALESCE(ps.dez, 0) ELSE 0 END
+                    ELSE 0 
+                END
+            ), 0) AS ha_proj,
+
+            COALESCE(SUM(
+                CASE 
+                    WHEN ps.conta = 'RECEITAS CORRENTES' THEN
+                        CASE WHEN 1 = ANY($2::int[]) THEN COALESCE(ps.jan, 0) ELSE 0 END +
+                        CASE WHEN 2 = ANY($2::int[]) THEN COALESCE(ps.fev, 0) ELSE 0 END +
+                        CASE WHEN 3 = ANY($2::int[]) THEN COALESCE(ps.mar, 0) ELSE 0 END +
+                        CASE WHEN 4 = ANY($2::int[]) THEN COALESCE(ps.abr, 0) ELSE 0 END +
+                        CASE WHEN 5 = ANY($2::int[]) THEN COALESCE(ps.mai, 0) ELSE 0 END +
+                        CASE WHEN 6 = ANY($2::int[]) THEN COALESCE(ps.jun, 0) ELSE 0 END +
+                        CASE WHEN 7 = ANY($2::int[]) THEN COALESCE(ps.jul, 0) ELSE 0 END +
+                        CASE WHEN 8 = ANY($2::int[]) THEN COALESCE(ps.ago, 0) ELSE 0 END +
+                        CASE WHEN 9 = ANY($2::int[]) THEN COALESCE(ps.set_, 0) ELSE 0 END +
+                        CASE WHEN 10 = ANY($2::int[]) THEN COALESCE(ps.out_, 0) ELSE 0 END +
+                        CASE WHEN 11 = ANY($2::int[]) THEN COALESCE(ps.nov, 0) ELSE 0 END +
+                        CASE WHEN 12 = ANY($2::int[]) THEN COALESCE(ps.dez, 0) ELSE 0 END
+                    ELSE 0 
+                END
+            ), 0) AS rec_proj
+        FROM planejamento_staging ps
+        WHERE ps.flag_valida = TRUE
+        AND ps.tipo = 'PROJETADO'
+        AND UPPER(TRIM(ps.financiamento_raw)) IN (
+            SELECT DISTINCT
+                CASE
+                    WHEN financiamento = 'GRATUIDADE NÃO REGIMENTAL' THEN 'GRATUITO'
+                    WHEN financiamento = 'GRATUIDADE REGIMENTAL' THEN 'GRATUIDADE REGIMENTAL'
+                    WHEN financiamento = 'PAGO POR PESSOA FÍSICA OU EMPRESA' THEN 'PAGO'
+                    ELSE financiamento
+                END
             FROM ofertas_filtradas
-        ) of
-        LEFT JOIN projetado_programas pp
-            ON pp.cod_oferta = of.cod_oferta
-        AND pp.ano = $1
-        AND pp.mes = ANY($2::int[])
+        )
     ),
 
     real_total AS (
@@ -8329,6 +8513,11 @@ async def modalidades_summary(
 
     d = dict(row or {})
 
+    if financiamentos:
+        d["mat_meta"] = float(d.get("mat_meta") or 0) / 2
+        d["ha_meta"] = float(d.get("ha_meta") or 0) / 2
+        d["rec_meta"] = float(d.get("rec_meta") or 0) / 2
+
     return {
         "matriculas": {
             "meta": float(d.get("mat_meta") or 0),
@@ -8362,6 +8551,7 @@ async def modalidades_tabela_programas(
     ano: int = 2026,
     meses: str | None = None,
     modalidades: str | None = None,
+    financiamentos: str | None = None,
 ):
     pool = request.app.state.pool
 
@@ -8372,24 +8562,35 @@ async def modalidades_tabela_programas(
 
     params = [ano, meses_ids]
     filtro_modalidades = ""
+    filtro_financiamentos = ""
 
     if modalidades:
         ids = [int(x) for x in modalidades.split(",") if str(x).strip()]
         if ids:
             filtro_modalidades = f" AND o.cod_modalidade = ANY(${len(params)+1}::int[])"
             params.append(ids)
+    
+    if financiamentos:
+        ids_fin = [int(x) for x in financiamentos.split(",") if str(x).strip()]
+        if ids_fin:
+            filtro_financiamentos = f" AND o.cod_financiamento = ANY(${len(params)+1}::int[])"
+            params.append(ids_fin)
 
     sql = f"""
     WITH ofertas_filtradas AS (
         SELECT DISTINCT
             o.codigo AS cod_oferta,
             o.cod_programa,
-            p.nome_programa AS programa
+            p.nome_programa AS programa,
+            UPPER(COALESCE(f.nome_financiamento, '')) AS financiamento
         FROM ofertas_programas o
         JOIN programas p
         ON p.codigo = o.cod_programa
+        LEFT JOIN financiamento f
+        ON f.codigo = o.cod_financiamento
         WHERE o.ano = $1
         {filtro_modalidades}
+        {filtro_financiamentos}
     ),
     programas_filtrados AS (
         SELECT DISTINCT
@@ -8399,16 +8600,76 @@ async def modalidades_tabela_programas(
     ),
     meta_mes AS (
         SELECT
-            of.cod_programa,
-            SUM(COALESCE(mp.matriculas_meta, 0)) AS matriculas_meta,
-            SUM(COALESCE(mp.ha_meta, 0)) AS ha_meta,
-            SUM(COALESCE(mp.receita_meta, 0)) AS receita_meta
-        FROM ofertas_filtradas of
-        LEFT JOIN meta_programas mp
-          ON mp.cod_oferta = of.cod_oferta
-         AND mp.ano = $1
-         AND mp.mes = ANY($2::int[])
-        GROUP BY of.cod_programa
+            pf.cod_programa,
+
+            COALESCE(SUM(
+                CASE WHEN UPPER(TRIM(ps.conta)) = 'MATRÍCULAS' THEN
+                    CASE WHEN 1 = ANY($2::int[]) THEN COALESCE(ps.jan, 0) ELSE 0 END +
+                    CASE WHEN 2 = ANY($2::int[]) THEN COALESCE(ps.fev, 0) ELSE 0 END +
+                    CASE WHEN 3 = ANY($2::int[]) THEN COALESCE(ps.mar, 0) ELSE 0 END +
+                    CASE WHEN 4 = ANY($2::int[]) THEN COALESCE(ps.abr, 0) ELSE 0 END +
+                    CASE WHEN 5 = ANY($2::int[]) THEN COALESCE(ps.mai, 0) ELSE 0 END +
+                    CASE WHEN 6 = ANY($2::int[]) THEN COALESCE(ps.jun, 0) ELSE 0 END +
+                    CASE WHEN 7 = ANY($2::int[]) THEN COALESCE(ps.jul, 0) ELSE 0 END +
+                    CASE WHEN 8 = ANY($2::int[]) THEN COALESCE(ps.ago, 0) ELSE 0 END +
+                    CASE WHEN 9 = ANY($2::int[]) THEN COALESCE(ps.set_, 0) ELSE 0 END +
+                    CASE WHEN 10 = ANY($2::int[]) THEN COALESCE(ps.out_, 0) ELSE 0 END +
+                    CASE WHEN 11 = ANY($2::int[]) THEN COALESCE(ps.nov, 0) ELSE 0 END +
+                    CASE WHEN 12 = ANY($2::int[]) THEN COALESCE(ps.dez, 0) ELSE 0 END
+                ELSE 0 END
+            ), 0) AS matriculas_meta,
+
+            COALESCE(SUM(
+                CASE WHEN UPPER(TRIM(ps.conta)) = 'HORA-ALUNO' THEN
+                    CASE WHEN 1 = ANY($2::int[]) THEN COALESCE(ps.jan, 0) ELSE 0 END +
+                    CASE WHEN 2 = ANY($2::int[]) THEN COALESCE(ps.fev, 0) ELSE 0 END +
+                    CASE WHEN 3 = ANY($2::int[]) THEN COALESCE(ps.mar, 0) ELSE 0 END +
+                    CASE WHEN 4 = ANY($2::int[]) THEN COALESCE(ps.abr, 0) ELSE 0 END +
+                    CASE WHEN 5 = ANY($2::int[]) THEN COALESCE(ps.mai, 0) ELSE 0 END +
+                    CASE WHEN 6 = ANY($2::int[]) THEN COALESCE(ps.jun, 0) ELSE 0 END +
+                    CASE WHEN 7 = ANY($2::int[]) THEN COALESCE(ps.jul, 0) ELSE 0 END +
+                    CASE WHEN 8 = ANY($2::int[]) THEN COALESCE(ps.ago, 0) ELSE 0 END +
+                    CASE WHEN 9 = ANY($2::int[]) THEN COALESCE(ps.set_, 0) ELSE 0 END +
+                    CASE WHEN 10 = ANY($2::int[]) THEN COALESCE(ps.out_, 0) ELSE 0 END +
+                    CASE WHEN 11 = ANY($2::int[]) THEN COALESCE(ps.nov, 0) ELSE 0 END +
+                    CASE WHEN 12 = ANY($2::int[]) THEN COALESCE(ps.dez, 0) ELSE 0 END
+                ELSE 0 END
+            ), 0) AS ha_meta,
+
+            COALESCE(SUM(
+                CASE WHEN UPPER(TRIM(ps.conta)) = 'RECEITAS CORRENTES' THEN
+                    CASE WHEN 1 = ANY($2::int[]) THEN COALESCE(ps.jan, 0) ELSE 0 END +
+                    CASE WHEN 2 = ANY($2::int[]) THEN COALESCE(ps.fev, 0) ELSE 0 END +
+                    CASE WHEN 3 = ANY($2::int[]) THEN COALESCE(ps.mar, 0) ELSE 0 END +
+                    CASE WHEN 4 = ANY($2::int[]) THEN COALESCE(ps.abr, 0) ELSE 0 END +
+                    CASE WHEN 5 = ANY($2::int[]) THEN COALESCE(ps.mai, 0) ELSE 0 END +
+                    CASE WHEN 6 = ANY($2::int[]) THEN COALESCE(ps.jun, 0) ELSE 0 END +
+                    CASE WHEN 7 = ANY($2::int[]) THEN COALESCE(ps.jul, 0) ELSE 0 END +
+                    CASE WHEN 8 = ANY($2::int[]) THEN COALESCE(ps.ago, 0) ELSE 0 END +
+                    CASE WHEN 9 = ANY($2::int[]) THEN COALESCE(ps.set_, 0) ELSE 0 END +
+                    CASE WHEN 10 = ANY($2::int[]) THEN COALESCE(ps.out_, 0) ELSE 0 END +
+                    CASE WHEN 11 = ANY($2::int[]) THEN COALESCE(ps.nov, 0) ELSE 0 END +
+                    CASE WHEN 12 = ANY($2::int[]) THEN COALESCE(ps.dez, 0) ELSE 0 END
+                ELSE 0 END
+            ), 0) AS receita_meta
+
+        FROM programas_filtrados pf
+        LEFT JOIN planejamento_staging ps
+        ON unaccent(UPPER(TRIM(ps.programa_raw))) = unaccent(UPPER(TRIM(pf.programa)))
+        AND ps.flag_valida = TRUE
+        AND ps.tipo = 'META'
+        AND COALESCE(TRIM(ps.cod_modalidade_raw), '') <> ''
+        AND UPPER(TRIM(ps.financiamento_raw)) IN (
+            SELECT DISTINCT
+                CASE
+                    WHEN financiamento = 'GRATUIDADE NÃO REGIMENTAL' THEN 'GRATUITO'
+                    WHEN financiamento = 'GRATUIDADE REGIMENTAL' THEN 'GRATUIDADE REGIMENTAL'
+                    WHEN financiamento = 'PAGO POR PESSOA FÍSICA OU EMPRESA' THEN 'PAGO'
+                    ELSE financiamento
+                END
+            FROM ofertas_filtradas
+        )
+        GROUP BY pf.cod_programa
     ),
     proj_mes AS (
         SELECT
@@ -8470,7 +8731,15 @@ async def modalidades_tabela_programas(
     async with pool.acquire() as conn:
         rows = await conn.fetch(sql, *params)
 
-    return [dict(r) for r in rows]
+    resultado = [dict(r) for r in rows]
+
+    if financiamentos:
+        for r in resultado:
+            r["matriculas_meta"] = float(r.get("matriculas_meta") or 0) / 2
+            r["ha_meta"] = float(r.get("ha_meta") or 0) / 2
+            r["receita_meta"] = float(r.get("receita_meta") or 0) / 2
+
+    return resultado
 
 @router.get("/uo/list")
 async def uo_list(
@@ -11614,12 +11883,14 @@ async def auth_login(payload: LoginPayload, request: Request, response: Response
         "perfil": row["perfil"]
     }
 
+    is_prod = os.getenv("ENV", "dev") == "prod"
+
     response.set_cookie(
         key="painel_session",
         value=token,
         httponly=True,
-        secure=IS_PROD,
-        samesite="none" if IS_PROD else "lax",
+        secure=is_prod,
+        samesite="none" if is_prod else "lax",
         path="/",
         max_age=60 * 60 * 8,
     )
@@ -11652,11 +11923,13 @@ async def auth_logout(request: Request, response: Response):
     if token and token in SESSOES_ATIVAS:
         del SESSOES_ATIVAS[token]
 
+    is_prod = os.getenv("ENV", "dev") == "prod"
+
     response.delete_cookie(
         "painel_session",
         path="/",
-        secure=IS_PROD,
-        samesite="none" if IS_PROD else "lax",
+        secure=is_prod,
+        samesite="none" if is_prod else "lax",
     )
 
     return {"ok": True}
@@ -12489,18 +12762,22 @@ async def importar_cr_planejamento(
 async def market_share_aprendizagem(
     request: Request,
     ano: int,
-    mes: int,
+    mes: int | None = None,
+    meses: str | None = None,
     subregioes: str | None = None,
 ):
     pool = request.app.state.pool
 
-    data_ini = date(ano, mes, 1)
-    if mes == 12:
-        data_fim = date(ano + 1, 1, 1) - timedelta(days=1)
-    else:
-        data_fim = date(ano, mes + 1, 1) - timedelta(days=1)
+    ids_meses = [int(x) for x in (meses or "").split(",") if x.strip().isdigit()]
 
-    params = [ano, mes]
+    if not ids_meses and mes:
+        ids_meses = [mes]
+
+    if not ids_meses:
+        ids_meses = [date.today().month]
+
+    params = [ano, ids_meses]
+
     filtro_sub = ""
 
     if subregioes:
@@ -12517,6 +12794,25 @@ async def market_share_aprendizagem(
         FROM cotas_municipios cm
         GROUP BY cm.cod_regiao
     ),
+    aprendizes_regiao AS (
+        SELECT
+            sr.codigo_regiao AS cod_regiao,
+            COALESCE(SUM(rp.matriculas_real), 0) AS aprendizes
+        FROM realizado_programas rp
+        JOIN ofertas_programas o
+        ON o.codigo = rp.cod_oferta
+        JOIN programas p
+        ON p.codigo = o.cod_programa
+        JOIN uo u
+        ON u.codigo = o.cod_uo
+        LEFT JOIN subregioes sr
+        ON sr.codigo = u.cod_subregiao
+        WHERE UPPER(TRIM(p.nome_programa)) = 'JOVEM APRENDIZ'
+        AND rp.ano = $1
+        AND rp.mes = ANY($2::int[])
+        {filtro_sub.replace("u.cod_subregiao", "u.cod_subregiao")}
+        GROUP BY sr.codigo_regiao
+    ),
     dados AS (
         SELECT
             sr.codigo_regiao AS cod_regiao,
@@ -12524,18 +12820,7 @@ async def market_share_aprendizagem(
 
             COUNT(DISTINCT NULLIF(TRIM(da.cnpj), '')) AS cnpjs,
 
-            (
-                SELECT SUM(COALESCE(mm2.matriculados, 0))
-                FROM turmas_movimento_mensal mm2
-                JOIN turmas t2 ON t2.codigo = mm2.cod_turma
-                JOIN uo u2 ON u2.codigo = t2.cod_uo
-                LEFT JOIN subregioes sr2 ON sr2.codigo = u2.cod_subregiao
-                JOIN programas p2 ON p2.codigo = t2.cod_programa
-                WHERE UPPER(TRIM(p2.nome_programa)) = 'JOVEM APRENDIZ'
-                AND mm2.ano = $1
-                AND mm2.mes = $2
-                AND sr2.codigo_regiao = sr.codigo_regiao
-            ) AS aprendizes
+            COALESCE(ap.aprendizes, 0) AS aprendizes
 
         FROM turmas_movimento_mensal mm
         JOIN turmas t ON t.codigo = mm.cod_turma
@@ -12545,14 +12830,16 @@ async def market_share_aprendizagem(
         JOIN uo u ON u.codigo = t.cod_uo
         LEFT JOIN subregioes sr ON sr.codigo = u.cod_subregiao
         LEFT JOIN regioes rg ON rg.codigo = sr.codigo_regiao
+        LEFT JOIN aprendizes_regiao ap
+            ON ap.cod_regiao = sr.codigo_regiao
         JOIN programas p ON p.codigo = t.cod_programa
 
         WHERE UPPER(TRIM(p.nome_programa)) = 'JOVEM APRENDIZ'
         AND mm.ano = $1
-        AND mm.mes = $2
+        AND mm.mes = ANY($2::int[])
         {filtro_sub}
 
-        GROUP BY sr.codigo_regiao, rg.nome
+        GROUP BY sr.codigo_regiao, rg.nome, ap.aprendizes
     )
     SELECT
         COALESCE(d.regiao, rg.nome, 'Sem região') AS regiao,
@@ -12575,14 +12862,17 @@ async def market_share_aprendizagem(
         SELECT
             COUNT(DISTINCT NULLIF(TRIM(da.cnpj), '')) AS total_cnpjs,
             (
-                SELECT SUM(COALESCE(mm2.matriculados, 0))
-                FROM turmas_movimento_mensal mm2
-                JOIN turmas t2 ON t2.codigo = mm2.cod_turma
-                JOIN programas p2 ON p2.codigo = t2.cod_programa
-                JOIN uo u2 ON u2.codigo = t2.cod_uo
-                WHERE UPPER(TRIM(p2.nome_programa)) = 'JOVEM APRENDIZ'
-                AND mm2.ano = $1
-                AND mm2.mes = $2
+                SELECT COALESCE(SUM(rp.matriculas_real), 0)
+                FROM realizado_programas rp
+                JOIN ofertas_programas o
+                ON o.codigo = rp.cod_oferta
+                JOIN programas p
+                ON p.codigo = o.cod_programa
+                JOIN uo u2
+                ON u2.codigo = o.cod_uo
+                WHERE UPPER(TRIM(p.nome_programa)) = 'JOVEM APRENDIZ'
+                AND rp.ano = $1
+                AND rp.mes = ANY($2::int[])
                 {filtro_sub.replace("u.cod_subregiao", "u2.cod_subregiao")}
             ) AS total_aprendizes
         FROM turmas_movimento_mensal mm
@@ -12594,7 +12884,7 @@ async def market_share_aprendizagem(
         JOIN uo u ON u.codigo = t.cod_uo
         WHERE UPPER(TRIM(p.nome_programa)) = 'JOVEM APRENDIZ'
         AND mm.ano = $1
-        AND mm.mes = $2
+        AND mm.mes = ANY($2::int[])
         {filtro_sub}
     ),
     cotas AS (
