@@ -8173,47 +8173,77 @@ async def modalidades_list(
     ano: int = 2026,
     mes: int = 1,
     meses: str | None = None,
+    financiamentos: str | None = None,
 ):
     pool = request.app.state.pool
 
-    meses_ids = [int(x) for x in (meses or "").split(",") if x.strip().isdigit()]
+    meses_ids = [
+        int(x) for x in (meses or "").split(",")
+        if x.strip().isdigit()
+    ]
+
     if not meses_ids:
         meses_ids = [1]
 
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT DISTINCT
-                m.codigo,
-                m.nome AS modalidade
-            FROM ofertas_programas o
-            JOIN modalidade m
-              ON m.codigo = o.cod_modalidade
-            LEFT JOIN meta_programas mp
-              ON mp.cod_oferta = o.codigo
-             AND mp.ano = $1
-             AND mp.mes = ANY($2::int[])
-            LEFT JOIN projetado_programas pp
-              ON pp.cod_oferta = o.codigo
-             AND pp.ano = $1
-             AND pp.mes = ANY($2::int[])
-            LEFT JOIN realizado_programas rp
-              ON rp.cod_programa = o.cod_programa
-             AND rp.ano = $1
-             AND rp.mes = ANY($2::int[])
-            WHERE o.ano = $1
-              AND m.nome IS NOT NULL
-              AND TRIM(m.nome) <> ''
-              AND (
-                    COALESCE(mp.matriculas_meta, 0) > 0
-                 OR COALESCE(pp.matriculas_proj, 0) > 0
-                 OR COALESCE(rp.matriculas_real, 0) > 0
-              )
-            ORDER BY m.nome
-            """,
-            ano,
-            meses_ids
+    ids_fin = [
+        int(x) for x in (financiamentos or "").split(",")
+        if x.strip().isdigit()
+    ]
+
+    filtros = [
+        "o.ano = $1",
+        "m.nome IS NOT NULL",
+        "TRIM(m.nome) <> ''"
+    ]
+
+    params = [ano, meses_ids]
+
+    if ids_fin:
+        filtros.append(
+            f"o.cod_financiamento = ANY(${len(params)+1}::int[])"
         )
+        params.append(ids_fin)
+
+    where = " AND ".join(filtros)
+
+    sql = f"""
+        SELECT DISTINCT
+            m.codigo,
+            m.nome AS modalidade
+        FROM ofertas_programas o
+        JOIN modalidade m
+          ON m.codigo = o.cod_modalidade
+        LEFT JOIN meta_programas mp
+          ON mp.cod_oferta = o.codigo
+         AND mp.ano = $1
+         AND mp.mes = ANY($2::int[])
+        LEFT JOIN projetado_programas pp
+          ON pp.cod_oferta = o.codigo
+         AND pp.ano = $1
+         AND pp.mes = ANY($2::int[])
+        LEFT JOIN realizado_programas rp
+          ON rp.cod_programa = o.cod_programa
+         AND rp.ano = $1
+         AND rp.mes = ANY($2::int[])
+        WHERE {where}
+          AND (
+                COALESCE(mp.matriculas_meta, 0) > 0
+            OR COALESCE(mp.ha_meta, 0) > 0
+            OR COALESCE(mp.receita_meta, 0) > 0
+
+            OR COALESCE(pp.matriculas_proj, 0) > 0
+            OR COALESCE(pp.ha_proj, 0) > 0
+            OR COALESCE(pp.receita_proj, 0) > 0
+
+            OR COALESCE(rp.matriculas_real, 0) > 0
+            OR COALESCE(rp.ha_real, 0) > 0
+            OR COALESCE(rp.receita_real, 0) > 0
+        )
+        ORDER BY m.nome
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
 
     return [dict(r) for r in rows]
 
@@ -8224,22 +8254,13 @@ async def modalidades_financiamentos(
     meses: str | None = None,
     modalidades: str | None = None,
 ):
-    ids_meses = [
-        int(x) for x in (meses or "").split(",")
-        if x.strip().isdigit()
-    ]
-
     ids_modalidades = [
         int(x) for x in (modalidades or "").split(",")
         if x.strip().isdigit()
     ]
 
-    filtros = ["rp.ano = $1"]
+    filtros = ["o.ano = $1"]
     params = [ano]
-
-    if ids_meses:
-        filtros.append(f"rp.mes = ANY(${len(params)+1}::int[])")
-        params.append(ids_meses)
 
     if ids_modalidades:
         filtros.append(f"o.cod_modalidade = ANY(${len(params)+1}::int[])")
@@ -8249,14 +8270,27 @@ async def modalidades_financiamentos(
 
     sql = f"""
         SELECT DISTINCT
-            f.codigo,
-            f.nome_financiamento AS financiamento
-        FROM realizado_programas rp
-        JOIN ofertas_programas o
-          ON o.codigo = rp.cod_oferta
+            MIN(f.codigo) AS codigo,
+            CASE
+                WHEN UPPER(TRIM(f.nome_financiamento)) IN (
+                    'PAGO',
+                    'PAGO POR PESSOA FÍSICA OU EMPRESA'
+                )
+                THEN 'PAGO POR PESSOA FÍSICA OU EMPRESA'
+
+                WHEN UPPER(TRIM(f.nome_financiamento)) IN (
+                    'GRATUITO',
+                    'GRATUIDADE NÃO REGIMENTAL'
+                )
+                THEN 'GRATUIDADE NÃO REGIMENTAL'
+
+                ELSE UPPER(TRIM(f.nome_financiamento))
+            END AS financiamento
+        FROM ofertas_programas o
         JOIN financiamento f
           ON f.codigo = o.cod_financiamento
         WHERE {where}
+        GROUP BY financiamento
         ORDER BY financiamento
     """
 
@@ -12949,4 +12983,143 @@ async def market_share_aprendizagem(
     return {
         "cards": cards_dict,
         "linhas": linhas
+    }
+
+@router.get("/performance/financiamento-resumo")
+async def performance_financiamento_resumo(
+    request: Request,
+    indicador: str,
+    ano: int,
+    meses: str | None = None,
+    programas: str | None = None,
+    subregioes: str | None = None,
+):
+    pool = request.app.state.pool
+
+    meses_ids = [
+        int(x)
+        for x in (meses or "").split(",")
+        if x.strip().isdigit()
+    ]
+
+    if not meses_ids:
+        meses_ids = list(range(1,13))
+
+    programas_ids = [
+        int(x)
+        for x in (programas or "").split(",")
+        if x.strip().isdigit()
+    ]
+
+    sub_ids = [
+        int(x)
+        for x in (subregioes or "").split(",")
+        if x.strip().isdigit()
+    ]
+
+    campo = {
+        "matriculas": "SUM(rp.matriculas_real)",
+        "hora_aluno": "SUM(rp.ha_real)"
+    }.get(indicador)
+
+    if not campo:
+        return []
+
+    filtros = [
+        "rp.ano = $1",
+        "rp.mes = ANY($2::int[])"
+    ]
+
+    params = [ano, meses_ids]
+
+    if programas_ids:
+        filtros.append(
+            f"o.cod_programa = ANY(${len(params)+1}::int[])"
+        )
+        params.append(programas_ids)
+
+    if sub_ids:
+        filtros.append(
+            f"o.cod_subregiao = ANY(${len(params)+1}::int[])"
+        )
+        params.append(sub_ids)
+
+    where = " AND ".join(filtros)
+
+    sql = f"""
+        SELECT
+            CASE
+                WHEN UPPER(TRIM(f.nome_financiamento))
+                    IN ('GRATUITO','GRATUIDADE NÃO REGIMENTAL')
+                THEN 'GRATUIDADE NÃO REGIMENTAL'
+
+                WHEN UPPER(TRIM(f.nome_financiamento))
+                    IN ('PAGO','PAGO POR PESSOA FÍSICA OU EMPRESA')
+                THEN 'PAGO POR PESSOA FÍSICA OU EMPRESA'
+
+                ELSE UPPER(TRIM(f.nome_financiamento))
+            END AS financiamento,
+
+            COALESCE(
+                {campo},
+                0
+            ) AS realizado
+
+        FROM realizado_programas rp
+
+        JOIN ofertas_programas o
+            ON o.codigo = rp.cod_oferta
+
+        LEFT JOIN financiamento f
+            ON f.codigo = o.cod_financiamento
+
+        WHERE {where}
+
+        GROUP BY financiamento
+
+        HAVING
+            COALESCE({campo},0) > 0
+
+        ORDER BY realizado DESC
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            sql,
+            *params
+        )
+
+    return [
+        dict(r)
+        for r in rows
+    ]
+
+@router.get("/importacoes/data/ultimo")
+async def ultimo_lote_data(request: Request):
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT
+                id,
+                nome_arquivo,
+                data_importacao,
+                status_processamento
+            FROM data_import_lotes
+            ORDER BY data_importacao DESC, id DESC
+            LIMIT 1
+        """)
+
+    if not row:
+        return {
+            "ok": False,
+            "mensagem": "Nenhum arquivo Data importado."
+        }
+
+    return {
+        "ok": True,
+        "lote_id": row["id"],
+        "arquivo": row["nome_arquivo"],
+        "data_importacao": row["data_importacao"],
+        "status": row["status_processamento"]
     }
