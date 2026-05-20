@@ -323,7 +323,7 @@ def aplicar_filtros_turmas_base(
         idx += 1
 
     if dt_inicio_ate:
-        sql += f" AND {alias_t}.data_fim <= ${idx}"
+        sql += f" AND {alias_t}.data_inicio <= ${idx}"
         params.append(datetime.fromisoformat(dt_inicio_ate).date())
         idx += 1
 
@@ -413,9 +413,9 @@ def aplicar_filtros_turmas_base(
 
         sql += ")"
 
-    if usar_filtro_padrao and data_fim_padrao:
-        sql += f" AND {alias_t}.data_fim >= ${idx}"
-        params.append(data_fim_padrao)
+    if data_fim_padrao:
+        sql += f" AND {alias_t}.ano_referencia = ${idx}"
+        params.append(data_fim_padrao.year)
         idx += 1
 
     return sql, params, idx
@@ -4190,18 +4190,66 @@ async def sge_turmas_estado(
                 END
             ) AS formato,
             base.vagas_total AS vagas,
-            COALESCE(SUM(tsr.matriculados), 0) AS matriculados,
-            COALESCE(SUM(tsr.pre_matriculados), 0) AS pre_matriculados,
+
+            LEAST(
+                COALESCE(SUM(tsr.matriculados), 0),
+                COALESCE(base.vagas_total, 0)
+            ) AS matriculados,
+
+            LEAST(
+                COALESCE(SUM(tsr.pre_matriculados), 0),
+                GREATEST(
+                    COALESCE(base.vagas_total, 0)
+                    - LEAST(
+                        COALESCE(SUM(tsr.matriculados), 0),
+                        COALESCE(base.vagas_total, 0)
+                    ),
+                    0
+                )
+            ) AS pre_matriculados,
+
             COALESCE(SUM(tsr.cancelados), 0) AS cancelados,
             COALESCE(SUM(tsr.desistentes), 0) AS desistentes,
             COALESCE(SUM(tsr.evadidos), 0) AS evadidos,
+
             GREATEST(
                 COALESCE(base.vagas_total, 0)
-                - COALESCE(SUM(tsr.matriculados), 0)
-                - COALESCE(SUM(tsr.pre_matriculados), 0),
+                - LEAST(
+                    COALESCE(SUM(tsr.matriculados), 0),
+                    COALESCE(base.vagas_total, 0)
+                )
+                - LEAST(
+                    COALESCE(SUM(tsr.pre_matriculados), 0),
+                    GREATEST(
+                        COALESCE(base.vagas_total, 0)
+                        - LEAST(
+                            COALESCE(SUM(tsr.matriculados), 0),
+                            COALESCE(base.vagas_total, 0)
+                        ),
+                        0
+                    )
+                ),
                 0
             ) AS vagas_restantes,
-            (COALESCE(SUM(tsr.matriculados), 0) + COALESCE(SUM(tsr.pre_matriculados), 0)) AS vagas_preenchidas,
+
+            (
+                LEAST(
+                    COALESCE(SUM(tsr.matriculados), 0),
+                    COALESCE(base.vagas_total, 0)
+                )
+                +
+                LEAST(
+                    COALESCE(SUM(tsr.pre_matriculados), 0),
+                    GREATEST(
+                        COALESCE(base.vagas_total, 0)
+                        - LEAST(
+                            COALESCE(SUM(tsr.matriculados), 0),
+                            COALESCE(base.vagas_total, 0)
+                        ),
+                        0
+                    )
+                )
+            ) AS vagas_preenchidas,
             u.cod_subregiao AS cod_subregiao
         FROM (
             SELECT
@@ -4231,6 +4279,7 @@ async def sge_turmas_estado(
         LEFT JOIN turmas_status_resumo tsr
         ON tsr.cod_turma = base.codigo
         WHERE base.lote_origem_data_id = $1
+        AND COALESCE(base.vagas_total, 0) > 0
         """
 
         params = [lote["id"]]
@@ -4492,8 +4541,26 @@ async def sge_turmas_tabela_uo(
             u.nome AS uo,
             COUNT(*) AS qtd_turmas,
             COALESCE(SUM(base.vagas_total), 0) AS qtd_vagas,
-            COALESCE(SUM(COALESCE(tsr.matriculados, 0)), 0) AS qtd_matriculados,
-            COALESCE(SUM(COALESCE(tsr.pre_matriculados, 0)), 0) AS qtd_pre_matriculados
+            COALESCE(SUM(
+                LEAST(
+                    COALESCE(tsr.matriculados, 0),
+                    COALESCE(base.vagas_total, 0)
+                )
+            ), 0) AS qtd_matriculados,
+
+            COALESCE(SUM(
+                LEAST(
+                    COALESCE(tsr.pre_matriculados, 0),
+                    GREATEST(
+                        COALESCE(base.vagas_total, 0)
+                        - LEAST(
+                            COALESCE(tsr.matriculados, 0),
+                            COALESCE(base.vagas_total, 0)
+                        ),
+                        0
+                    )
+                )
+            ), 0) AS qtd_pre_matriculados
         FROM (
             SELECT
                 t.codigo,
@@ -4654,23 +4721,18 @@ async def sge_turmas_tabela_uo(
 @router.get("/sge_turmas/uos")
 async def sge_turmas_uos(request: Request):
     pool = request.app.state.pool
-    data_fim_padrao = date(2026, 1, 1)
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT DISTINCT
-                u.codigo,
-                u.nome
-            FROM turmas t
-            JOIN uo u
-              ON u.codigo = t.cod_uo
-            WHERE u.nome IS NOT NULL
-              AND TRIM(u.nome) <> ''
-              AND t.data_fim >= $1
-            ORDER BY u.nome
-            """,
-            data_fim_padrao
+            SELECT
+                codigo,
+                nome
+            FROM uo
+            WHERE nome IS NOT NULL
+              AND TRIM(nome) <> ''
+            ORDER BY nome
+            """
         )
 
     return [dict(r) for r in rows]
@@ -11157,6 +11219,9 @@ async def importar_data(request: Request, arquivo: UploadFile = File(...)):
                 formato = norm_text(v(row, "formato_turma", "Formato Turma", "TIPO_MEDIACAOTURMA"))
                 turno = norm_text(v(row, "turno", "Turno", "TURNO"))
                 vagas = norm_int(v(row, "vagas", "Vagas", "VAGAS", "nro_max_previstos_alunos", "NRO_MAX_PREVISTOS_ALUNOS", "NRO_MAX_PREVISTOS_ALUNOS", "NRO MAX PREVISTOS ALUNOS"))
+
+                if vagas is not None and vagas > 5000:
+                    vagas = 0
 
                 status = (status_matricula or "").strip().upper()
 
