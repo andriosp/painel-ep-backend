@@ -232,6 +232,32 @@ def normalizar_subregiao(v):
 
     return s
 
+def normalizar_programa(v):
+    s = norm_upper(v)
+    if not s:
+        return None
+
+    s_sem_acento = (
+        s.replace("Á", "A").replace("À", "A").replace("Â", "A").replace("Ã", "A")
+         .replace("É", "E").replace("Ê", "E")
+         .replace("Í", "I")
+         .replace("Ó", "O").replace("Ô", "O").replace("Õ", "O")
+         .replace("Ú", "U")
+         .replace("Ç", "C")
+    )
+
+    if s_sem_acento in ("SEJA PRO+", "SEJA PRO +"):
+        return "SEJA PRÓ+"
+
+    if s_sem_acento in (
+        "TECNICOS EAD INDUSTRIA",
+        "TECNICO EAD PARA A INDUSTRIA",
+        "TECNICOS EAD PARA A INDUSTRIA"
+    ):
+        return "TÉCNICO EAD PARA A INDÚSTRIA"
+
+    return s
+
 def aplicar_filtros_turmas_base(
     sql: str,
     params: list,
@@ -896,7 +922,7 @@ async def processar_planejamento(request: Request, lote_id: int):
                 # -----------------------------
                 # PROGRAMA
                 # -----------------------------
-                programa_nome = r["programa_raw"].strip().upper()
+                programa_nome = normalizar_programa(r["programa_raw"])
 
                 cod_programa = programas_map.get(programa_nome)
 
@@ -907,7 +933,7 @@ async def processar_planejamento(request: Request, lote_id: int):
                         VALUES ($1)
                         RETURNING codigo
                         """,
-                        r["programa_raw"].strip()
+                        programa_nome
                     )
                     cod_programa = row_prog["codigo"]
                     programas_map[programa_nome] = cod_programa
@@ -8604,10 +8630,10 @@ async def modalidades_list(
           ON pp.cod_oferta = o.codigo
          AND pp.ano = $1
          AND pp.mes = ANY($2::int[])
-        LEFT JOIN realizado_programas rp
-          ON rp.cod_programa = o.cod_programa
-         AND rp.ano = $1
-         AND rp.mes = ANY($2::int[])
+         LEFT JOIN realizado_programas rp
+        ON rp.cod_oferta = o.codigo
+        AND rp.ano = $1
+        AND rp.mes = ANY($2::int[])
         WHERE {where}
           AND (
                 COALESCE(mp.matriculas_meta, 0) > 0
@@ -8621,7 +8647,7 @@ async def modalidades_list(
             OR COALESCE(rp.matriculas_real, 0) > 0
             OR COALESCE(rp.ha_real, 0) > 0
             OR COALESCE(rp.receita_real, 0) > 0
-        )
+            )
         ORDER BY m.nome
     """
 
@@ -8637,23 +8663,34 @@ async def modalidades_financiamentos(
     meses: str | None = None,
     modalidades: str | None = None,
 ):
+    meses_ids = [
+        int(x) for x in (meses or "").split(",")
+        if x.strip().isdigit()
+    ]
+
+    if not meses_ids:
+        meses_ids = list(range(1, 13))
+
     ids_modalidades = [
         int(x) for x in (modalidades or "").split(",")
         if x.strip().isdigit()
     ]
 
     filtros = ["o.ano = $1"]
-    params = [ano]
+    params = [ano, meses_ids]
 
     if ids_modalidades:
-        filtros.append(f"o.cod_modalidade = ANY(${len(params)+1}::int[])")
+        filtros.append(
+            f"o.cod_modalidade = ANY(${len(params)+1}::int[])"
+        )
         params.append(ids_modalidades)
 
     where = " AND ".join(filtros)
 
     sql = f"""
-        SELECT DISTINCT
+        SELECT
             MIN(f.codigo) AS codigo,
+
             CASE
                 WHEN UPPER(TRIM(f.nome_financiamento)) IN (
                     'PAGO',
@@ -8669,11 +8706,46 @@ async def modalidades_financiamentos(
 
                 ELSE UPPER(TRIM(f.nome_financiamento))
             END AS financiamento
+
         FROM ofertas_programas o
+
         JOIN financiamento f
           ON f.codigo = o.cod_financiamento
+
+        LEFT JOIN meta_programas mp
+          ON mp.cod_oferta = o.codigo
+         AND mp.ano = $1
+         AND mp.mes = ANY($2::int[])
+
+        LEFT JOIN projetado_programas pp
+          ON pp.cod_oferta = o.codigo
+         AND pp.ano = $1
+         AND pp.mes = ANY($2::int[])
+
+        LEFT JOIN realizado_programas rp
+          ON rp.cod_oferta = o.codigo
+         AND rp.ano = $1
+         AND rp.mes = ANY($2::int[])
+
         WHERE {where}
+
         GROUP BY financiamento
+
+        HAVING
+            SUM(COALESCE(mp.matriculas_meta,0))
+          + SUM(COALESCE(mp.ha_meta,0))
+          + SUM(COALESCE(mp.receita_meta,0))
+
+          + SUM(COALESCE(pp.matriculas_proj,0))
+          + SUM(COALESCE(pp.ha_proj,0))
+          + SUM(COALESCE(pp.receita_proj,0))
+
+          + SUM(COALESCE(rp.matriculas_real,0))
+          + SUM(COALESCE(rp.ha_real,0))
+          + SUM(COALESCE(rp.receita_real,0))
+
+          <> 0
+
         ORDER BY financiamento
     """
 
@@ -8727,6 +8799,17 @@ async def modalidades_summary(
                 FROM ofertas_filtradas
             )
             """
+    
+    filtro_modalidade_meta = ""
+
+    if ids:
+        filtro_modalidade_meta = """
+        AND NULLIF(TRIM(ps.cod_modalidade_raw), '')::int IN (
+            SELECT DISTINCT cod_modalidade
+            FROM ofertas_filtradas
+            WHERE cod_modalidade IS NOT NULL
+        )
+        """
 
     sql = f"""
     WITH ofertas_filtradas AS (
@@ -8828,7 +8911,7 @@ async def modalidades_summary(
         )
         AND ps.flag_valida = TRUE
         AND ps.tipo = 'META'
-
+        {filtro_modalidade_meta}
         {filtro_fin_meta}
     ),
 
@@ -8901,7 +8984,7 @@ async def modalidades_summary(
         )
         AND ps.flag_valida = TRUE
         AND ps.tipo = 'PROJETADO'
-
+        {filtro_modalidade_meta}
         {filtro_fin_meta}
     ),
 
@@ -9004,6 +9087,7 @@ async def modalidades_tabela_programas(
         SELECT DISTINCT
             o.codigo AS cod_oferta,
             o.cod_programa,
+            o.cod_modalidade,
             p.nome_programa AS programa,
             UPPER(COALESCE(f.nome_financiamento, '')) AS financiamento
         FROM ofertas_programas o
@@ -9016,10 +9100,89 @@ async def modalidades_tabela_programas(
         {filtro_financiamentos}
     ),
     programas_filtrados AS (
+
+        -- programas com planejamento
         SELECT DISTINCT
-            cod_programa,
-            programa
-        FROM ofertas_filtradas
+            o.cod_programa,
+            p.nome_programa AS programa
+
+        FROM planejamento_staging ps
+
+        JOIN programas p
+        ON
+            CASE
+                WHEN unaccent(UPPER(TRIM(ps.programa_raw))) IN (
+                    'TECNICO EAD INDUSTRIA',
+                    'TECNICO EAD PARA A INDUSTRIA'
+                )
+                THEN 'TECNICO EAD PARA A INDUSTRIA'
+
+                WHEN unaccent(UPPER(TRIM(ps.programa_raw))) IN (
+                    'SEJA PRO+',
+                    'SEJA PRÓ+'
+                )
+                THEN 'SEJA PRO+'
+
+                ELSE unaccent(UPPER(TRIM(ps.programa_raw)))
+            END
+
+            =
+
+            CASE
+                WHEN unaccent(UPPER(TRIM(p.nome_programa))) IN (
+                    'TECNICO EAD INDUSTRIA',
+                    'TECNICO EAD PARA A INDUSTRIA'
+                )
+                THEN 'TECNICO EAD PARA A INDUSTRIA'
+
+                WHEN unaccent(UPPER(TRIM(p.nome_programa))) IN (
+                    'SEJA PRO+',
+                    'SEJA PRÓ+'
+                )
+                THEN 'SEJA PRO+'
+
+                ELSE unaccent(UPPER(TRIM(p.nome_programa)))
+            END
+
+        JOIN ofertas_filtradas o
+        ON o.cod_programa = p.codigo
+        AND o.cod_modalidade =
+            NULLIF(TRIM(ps.cod_modalidade_raw), '')::int
+
+        WHERE ps.flag_valida = TRUE
+
+        AND ps.lote_id = (
+                SELECT id
+                FROM planejamento_import_lotes
+                WHERE ano_referencia = $1
+                AND status_processamento='processado'
+                ORDER BY id DESC
+                LIMIT 1
+        )
+
+        AND ps.tipo IN ('META','PROJETADO')
+
+
+        UNION
+
+
+        -- programas somente com realizado
+        SELECT DISTINCT
+            of.cod_programa,
+            of.programa
+
+        FROM ofertas_filtradas of
+
+        JOIN realizado_programas rp
+        ON rp.cod_oferta = of.cod_oferta
+        AND rp.ano = $1
+        AND rp.mes = ANY($2::int[])
+
+        WHERE
+            COALESCE(rp.matriculas_real,0) <> 0
+            OR COALESCE(rp.ha_real,0) <> 0
+            OR COALESCE(rp.receita_real,0) <> 0
+
     ),
     meta_mes AS (
         SELECT
@@ -9074,7 +9237,9 @@ async def modalidades_tabela_programas(
                     CASE WHEN 11 = ANY($2::int[]) THEN COALESCE(ps.nov, 0) ELSE 0 END +
                     CASE WHEN 12 = ANY($2::int[]) THEN COALESCE(ps.dez, 0) ELSE 0 END
                 ELSE 0 END
-            ), 0) AS receita_meta
+            ), 0) AS receita_meta,
+
+            COUNT(ps.id) AS qtd_linhas_planejamento
 
         FROM programas_filtrados pf
         LEFT JOIN planejamento_staging ps
@@ -9114,7 +9279,20 @@ async def modalidades_tabela_programas(
         END
         AND ps.flag_valida = TRUE
         AND ps.tipo = 'META'
-        AND COALESCE(TRIM(ps.cod_modalidade_raw), '') <> ''
+        AND ps.lote_id = (
+            SELECT id
+            FROM planejamento_import_lotes
+            WHERE ano_referencia = $1
+            AND status_processamento = 'processado'
+            ORDER BY id DESC
+            LIMIT 1
+        )
+        AND NULLIF(TRIM(ps.cod_modalidade_raw), '')::int IN (
+            SELECT DISTINCT ofm.cod_modalidade
+            FROM ofertas_filtradas ofm
+            WHERE ofm.cod_programa = pf.cod_programa
+            AND ofm.cod_modalidade IS NOT NULL
+        )
         AND UPPER(TRIM(ps.financiamento_raw)) IN (
             SELECT DISTINCT
                 CASE
@@ -9162,6 +9340,7 @@ async def modalidades_tabela_programas(
         COALESCE(pj.ha_proj, 0) AS ha_proj,
         COALESCE(r.ha_real, 0) AS ha_real,
         COALESCE(m.receita_meta, 0) AS receita_meta,
+        COALESCE(m.qtd_linhas_planejamento, 0) AS qtd_linhas_planejamento,
         COALESCE(pj.receita_proj, 0) AS receita_proj,
         COALESCE(r.receita_real, 0) AS receita_real
     FROM programas_filtrados pf
@@ -9172,15 +9351,11 @@ async def modalidades_tabela_programas(
     LEFT JOIN real_mes r
       ON r.cod_programa = pf.cod_programa
     WHERE
-        COALESCE(m.matriculas_meta, 0) <> 0
-        OR COALESCE(pj.matriculas_proj, 0) <> 0
-        OR COALESCE(r.matriculas_real, 0) <> 0
-        OR COALESCE(m.ha_meta, 0) <> 0
-        OR COALESCE(pj.ha_proj, 0) <> 0
-        OR COALESCE(r.ha_real, 0) <> 0
-        OR COALESCE(m.receita_meta, 0) <> 0
-        OR COALESCE(pj.receita_proj, 0) <> 0
-        OR COALESCE(r.receita_real, 0) <> 0
+        COALESCE(m.qtd_linhas_planejamento,0) > 0
+
+        OR COALESCE(r.matriculas_real,0) > 0
+        OR COALESCE(r.ha_real,0) > 0
+        OR COALESCE(r.receita_real,0) > 0
     ORDER BY pf.programa
     """
 
@@ -9188,12 +9363,6 @@ async def modalidades_tabela_programas(
         rows = await conn.fetch(sql, *params)
 
     resultado = [dict(r) for r in rows]
-
-    if financiamentos:
-        for r in resultado:
-            r["matriculas_meta"] = float(r.get("matriculas_meta") or 0) / 2
-            r["ha_meta"] = float(r.get("ha_meta") or 0) / 2
-            r["receita_meta"] = float(r.get("receita_meta") or 0) / 2
 
     return resultado
 
@@ -11189,39 +11358,19 @@ async def regioes_ranking(
         GROUP BY UPPER(TRIM(ps.regiao))
     ),
 
-    mat AS (
+    realizado AS (
         SELECT
             UPPER(TRIM(r.nome)) AS regiao,
-            SUM(COALESCE(im.valor, 0)) AS matriculas_real
-        FROM importacao_matriculas_staging im
-        JOIN uo u ON u.codigo = im.cod_uo
+            SUM(COALESCE(rp.matriculas_real, 0)) AS matriculas_real,
+            SUM(COALESCE(rp.ha_real, 0)) AS ha_real,
+            SUM(COALESCE(rp.receita_real, 0)) AS receita_real
+        FROM realizado_programas rp
+        JOIN ofertas_programas o ON o.codigo = rp.cod_oferta
+        JOIN uo u ON u.codigo = o.cod_uo
         JOIN subregioes s ON s.codigo = u.cod_subregiao
         JOIN regioes r ON r.codigo = s.codigo_regiao
-        WHERE im.ano = $1
-        AND im.mes = ANY($2::int[])
-        GROUP BY UPPER(TRIM(r.nome))
-    ),
-
-    ha AS (
-        SELECT
-            UPPER(TRIM(ih.regiao)) AS regiao,
-            SUM(COALESCE(ih.valor,0)) AS ha_real
-        FROM importacao_ha_staging ih
-        WHERE ih.ano = $1
-        AND ih.mes = ANY($2::int[])
-        GROUP BY UPPER(TRIM(ih.regiao))
-    ),
-
-    rec AS (
-        SELECT
-            UPPER(TRIM(r.nome)) AS regiao,
-            SUM(COALESCE(ir.valor, 0)) AS receita_real
-        FROM importacao_receita_staging ir
-        JOIN uo u ON u.codigo = ir.cod_uo
-        JOIN subregioes s ON s.codigo = u.cod_subregiao
-        JOIN regioes r ON r.codigo = s.codigo_regiao
-        WHERE ir.ano = $1
-        AND ir.mes = ANY($2::int[])
+        WHERE rp.ano = $1
+        AND rp.mes = ANY($2::int[])
         GROUP BY UPPER(TRIM(r.nome))
     ),
 
@@ -11242,33 +11391,39 @@ async def regioes_ranking(
         r.codigo AS cod_regiao,
         r.nome AS regiao,
 
-        COALESCE(mat.matriculas_real, 0) AS matriculas_real,
+        COALESCE(realizado.matriculas_real, 0) AS matriculas_real,
         COALESCE(meta.matriculas_meta, 0) AS matriculas_meta,
-        COALESCE(turmas.turmas_ativas, 0) AS turmas_ativas,
 
-        COALESCE(ha.ha_real, 0) AS ha_real,
+        COALESCE(realizado.ha_real, 0) AS ha_real,
         COALESCE(meta.ha_meta, 0) AS ha_meta,
 
-        COALESCE(rec.receita_real, 0) AS receita_real,
+        COALESCE(realizado.receita_real, 0) AS receita_real,
         COALESCE(meta.receita_meta, 0) AS receita_meta,
+
+        COALESCE(turmas.turmas_ativas, 0) AS turmas_ativas,
 
         CASE
             WHEN COALESCE(meta.matriculas_meta, 0) > 0
-            THEN ROUND((COALESCE(mat.matriculas_real, 0) / meta.matriculas_meta) * 100, 1)
+            THEN ROUND(
+                (COALESCE(realizado.matriculas_real, 0)::numeric / meta.matriculas_meta::numeric) * 100,
+                1
+            )
             ELSE 0
         END AS pct_matriculas,
 
         CASE
             WHEN COALESCE(meta.ha_meta, 0) > 0
-            THEN ROUND((COALESCE(ha.ha_real, 0) / meta.ha_meta) * 100, 1)
+            THEN ROUND(
+                (COALESCE(realizado.ha_real, 0)::numeric / meta.ha_meta::numeric) * 100,
+                1
+            )
             ELSE 0
         END AS pct_ha,
 
         CASE
-            WHEN COALESCE(meta.receita_meta,0) > 0
+            WHEN COALESCE(meta.receita_meta, 0) > 0
             THEN ROUND(
-                (COALESCE(rec.receita_real,0)
-                / meta.receita_meta) * 100,
+                (COALESCE(realizado.receita_real, 0)::numeric / meta.receita_meta::numeric) * 100,
                 1
             )
             ELSE 0
@@ -11276,9 +11431,7 @@ async def regioes_ranking(
 
     FROM regioes r
     LEFT JOIN meta ON meta.regiao = UPPER(TRIM(r.nome))
-    LEFT JOIN mat ON mat.regiao = UPPER(TRIM(r.nome))
-    LEFT JOIN ha ON ha.regiao = UPPER(TRIM(r.nome))
-    LEFT JOIN rec ON rec.regiao = UPPER(TRIM(r.nome))
+    LEFT JOIN realizado ON realizado.regiao = UPPER(TRIM(r.nome))
     LEFT JOIN turmas ON turmas.cod_regiao = r.codigo
     {filtro_regiao}
     ORDER BY pct_matriculas DESC, r.nome
@@ -11320,79 +11473,23 @@ async def detalhamento_regiao(
     """
 
     sql = f"""
-    WITH mat AS (
-
+    WITH realizado AS (
         SELECT
             u.codigo AS cod_uo,
             UPPER(TRIM(u.nome)) AS unidade,
 
-            SUM(im.valor)
-            AS matriculas_real
+            SUM(COALESCE(rp.matriculas_real, 0)) AS matriculas_real,
+            SUM(COALESCE(rp.ha_real, 0)) AS ha_real,
+            SUM(COALESCE(rp.receita_real, 0)) AS receita_real
 
-        FROM importacao_matriculas_staging im
+        FROM realizado_programas rp
+        JOIN ofertas_programas o ON o.codigo = rp.cod_oferta
+        JOIN uo u ON u.codigo = o.cod_uo
+        JOIN subregioes s ON s.codigo = u.cod_subregiao
 
-        JOIN uo u
-            ON u.codigo =
-            im.cod_uo
-
-        JOIN subregioes s
-            ON s.codigo =
-            u.cod_subregiao
-
+        WHERE rp.ano = $1
+        AND rp.mes = ANY($2::int[])
         AND ($3::int IS NULL OR s.codigo_regiao = $3)
-        AND im.ano=$1
-        AND im.mes=
-        ANY($2::int[])
-
-        GROUP BY u.codigo, UPPER(TRIM(u.nome))
-    ),
-
-    ha AS (
-
-        SELECT
-            u.codigo AS cod_uo,
-            UPPER(TRIM(u.nome)) AS unidade,
-
-            SUM(COALESCE(ih.valor, 0)) AS ha_real
-
-        FROM importacao_ha_staging ih
-
-        JOIN uo u
-        ON u.codigo = ih.cod_uo
-
-        JOIN subregioes s
-        ON s.codigo = u.cod_subregiao
-
-        AND ($3::int IS NULL OR s.codigo_regiao = $3)
-        AND ih.ano = $1
-        AND ih.mes = ANY($2::int[])
-
-        GROUP BY u.codigo, UPPER(TRIM(u.nome))
-    ),
-
-    rec AS (
-
-        SELECT
-            u.codigo AS cod_uo,
-            UPPER(TRIM(u.nome)) AS unidade,
-
-            SUM(ir.valor)
-            receita_real
-
-        FROM importacao_receita_staging ir
-
-        JOIN uo u
-            ON u.codigo=
-            ir.cod_uo
-
-        JOIN subregioes s
-            ON s.codigo=
-            u.cod_subregiao
-
-        AND ($3::int IS NULL OR s.codigo_regiao = $3)
-        AND ir.ano=$1
-        AND ir.mes=
-            ANY($2::int[])
 
         GROUP BY u.codigo, UPPER(TRIM(u.nome))
     ),
@@ -11405,20 +11502,36 @@ async def detalhamento_regiao(
             SUM(valor_meta) AS valor_meta
         FROM (
             SELECT DISTINCT
-                NULLIF(cod_uo_raw, '')::int AS cod_uo,
-                UPPER(TRIM(desc_uo_raw)) AS unidade,
-                UPPER(TRIM(conta)) AS conta,
-                aba_origem,
-                linha_numero,
+                NULLIF(ps.cod_uo_raw, '')::int AS cod_uo,
+
+                UPPER(
+                    TRIM(
+                        COALESCE(
+                            u.nome,
+                            ps.desc_uo_raw
+                        )
+                    )
+                ) AS unidade,
+
+                UPPER(TRIM(ps.conta)) AS conta,
+
+                ps.aba_origem,
+
+                ps.linha_numero,
+
                 ({meta_periodo}) AS valor_meta
-            FROM planejamento_staging
-            WHERE flag_valida IS DISTINCT FROM FALSE
-            AND tipo = 'META'
-            AND cod_uo_raw IS NOT NULL
-            AND NULLIF(cod_uo_raw, '') IS NOT NULL
+
+            FROM planejamento_staging ps
+
+            LEFT JOIN uo u
+                ON u.codigo = NULLIF(ps.cod_uo_raw, '')::int
+            WHERE ps.flag_valida IS DISTINCT FROM FALSE
+            AND ps.tipo = 'META'
+            AND ps.cod_uo_raw IS NOT NULL
+            AND NULLIF(ps.cod_uo_raw, '') IS NOT NULL
             AND (
                 $3::int IS NULL
-                OR UPPER(TRIM(regiao)) = (
+                OR UPPER(TRIM(ps.regiao)) = (
                     SELECT UPPER(TRIM(nome))
                     FROM regioes
                     WHERE codigo = $3
@@ -11462,55 +11575,54 @@ async def detalhamento_regiao(
 
     SELECT
         COALESCE(
-            mat.unidade,
-            ha.unidade,
-            rec.unidade,
+            realizado.unidade,
             meta.unidade
         ) AS unidade,
 
-        COALESCE(mat.matriculas_real, 0) AS matriculas_real,
+        COALESCE(realizado.matriculas_real, 0) AS matriculas_real,
         COALESCE(meta.matriculas_meta, 0) AS matriculas_meta,
         COALESCE(ta.turmas_ativas, 0) AS turmas_ativas,
 
         CASE
             WHEN COALESCE(meta.matriculas_meta, 0) > 0
-            THEN ROUND((COALESCE(mat.matriculas_real, 0) / meta.matriculas_meta) * 100, 1)
+            THEN ROUND(
+                (COALESCE(realizado.matriculas_real, 0)::numeric / meta.matriculas_meta) * 100,
+                1
+            )
             ELSE 0
         END AS pct_matriculas,
 
-        COALESCE(ha.ha_real, 0) AS ha_real,
+        COALESCE(realizado.ha_real, 0) AS ha_real,
         COALESCE(meta.ha_meta, 0) AS ha_meta,
 
         CASE
             WHEN COALESCE(meta.ha_meta, 0) > 0
-            THEN ROUND((COALESCE(ha.ha_real, 0) / meta.ha_meta) * 100, 1)
+            THEN ROUND(
+                (COALESCE(realizado.ha_real, 0)::numeric / meta.ha_meta) * 100,
+                1
+            )
             ELSE 0
         END AS pct_ha,
 
-        COALESCE(rec.receita_real, 0) AS receita_real,
+        COALESCE(realizado.receita_real, 0) AS receita_real,
         COALESCE(meta.receita_meta, 0) AS receita_meta,
 
         CASE
             WHEN COALESCE(meta.receita_meta, 0) > 0
-            THEN ROUND((COALESCE(rec.receita_real, 0) / meta.receita_meta) * 100, 1)
+            THEN ROUND(
+                (COALESCE(realizado.receita_real, 0)::numeric / meta.receita_meta) * 100,
+                1
+            )
             ELSE 0
         END AS pct_receita
 
-    FROM mat
-
-    FULL JOIN ha
-        USING (cod_uo)
-
-    FULL JOIN rec
-        USING (cod_uo)
+    FROM realizado
 
     FULL JOIN meta
         USING (cod_uo)
-    
-    LEFT JOIN turmas_ativas ta
-        ON ta.cod_uo = COALESCE(mat.cod_uo, ha.cod_uo, rec.cod_uo, meta.cod_uo)
 
-    ORDER BY matriculas_real DESC
+    LEFT JOIN turmas_ativas ta
+        ON ta.cod_uo = COALESCE(realizado.cod_uo, meta.cod_uo)
     """
 
     async with pool.acquire() as conn:
