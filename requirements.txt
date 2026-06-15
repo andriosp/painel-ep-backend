@@ -7,3 +7,4 @@ pandas
 openpyxl
 bcrypt
 PyJWT
+reportlab

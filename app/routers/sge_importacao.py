@@ -10,11 +10,17 @@ import asyncpg
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Request, Response
 from datetime import datetime, date, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, List
 from pydantic import BaseModel
 from pathlib import Path
 from pydantic import BaseModel
+from app.services.relatorio_executivo import montar_preview_relatorio_executivo
+from fastapi.responses import StreamingResponse
+
+from app.services.pdf_relatorio_executivo import (
+    gerar_pdf_relatorio_executivo
+)
 
 router = APIRouter()
 
@@ -57,6 +63,44 @@ class AtualizarUsuarioPayload(BaseModel):
     perfil_id: int
     ativo: bool
 
+class ExecutivoAcaoPayload(BaseModel):
+    ano: int
+    mes: int | None = None
+    programa: str | None = None
+    regiao: str | None = None
+    subregiao: str | None = None
+    uo: str | None = None
+    tipo: str | None = None
+    titulo: str
+    descricao: str | None = None
+    responsavel: str | None = None
+    data_prevista: date | None = None
+    status: str = "Planejada"
+    evidencia: str | None = None
+
+class RelatorioFiltrosPayload(BaseModel):
+    ano: int | None = None
+    meses: list[int] = []
+    programa: str | None = None
+    regiao: str | None = None
+    subregiao: str | None = None
+    uo: str | None = None
+
+
+class RelatorioOpcoesPayload(BaseModel):
+    incluir_graficos: bool = True
+    incluir_recomendacoes: bool = True
+    incluir_acoes: bool = True
+
+
+class RelatorioGerarPayload(BaseModel):
+    tipo: str
+    formato: str
+    orientacao: str
+
+    filtros: RelatorioFiltrosPayload
+    opcoes: RelatorioOpcoesPayload
+
 ABAS_PLANEJAMENTO = [
     "Consolidado Projetado e Meta",
 ]
@@ -82,9 +126,6 @@ def norm_decimal(v):
         return None
 
     try:
-        if isinstance(v, (int, float)):
-            return int(math.floor(float(v) + 0.5))
-
         s = str(v).strip().replace("\xa0", "")
 
         if "," in s and "." in s:
@@ -92,7 +133,7 @@ def norm_decimal(v):
         elif "," in s:
             s = s.replace(",", ".")
 
-        return int(math.floor(float(s) + 0.5))
+        return Decimal(s).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     except Exception:
         return None
@@ -862,21 +903,46 @@ async def processar_planejamento(request: Request, lote_id: int):
             for row in await conn.fetch("SELECT codigo, nome_financiamento FROM financiamento")
         }
 
-        cr_uo_map = {
-            row["cr"]: row["cod_uo"]
-            for row in await conn.fetch("SELECT cr, cod_uo FROM cr_planejamento")
+        cr_map = {
+            row["cr"]: {
+                "cod_programa": row["cod_programa"],
+                "cod_modalidade": row["cod_modalidade"],
+                "cod_formato": row["cod_formato"],
+                "cod_financiamento": row["cod_financiamento"],
+            }
+            for row in await conn.fetch("""
+                SELECT
+                    cr,
+                    cod_programa,
+                    cod_modalidade,
+                    cod_formato,
+                    cod_financiamento
+                FROM cr_planejamento
+            """)
+        }
+
+        cr_uo_set = {
+            (row["cr"], row["cod_uo"])
+            for row in await conn.fetch("""
+                SELECT cr, cod_uo
+                FROM cr_planejamento_uo
+                WHERE ativo = TRUE
+            """)
         }
 
         ofertas_map = {}
 
         rows_uo = await conn.fetch(
             """
-            SELECT codigo_sge, codigo
+            SELECT codigo
             FROM uo
-            WHERE codigo_sge IS NOT NULL
             """
         )
-        uo_map = {str(r["codigo_sge"]).strip(): r["codigo"] for r in rows_uo}
+
+        uo_map = {
+            str(r["codigo"]).strip(): r["codigo"]
+            for r in rows_uo
+        }
 
         rows_modalidade = await conn.fetch(
             """
@@ -919,52 +985,26 @@ async def processar_planejamento(request: Request, lote_id: int):
                     flush=True
                 )
 
-                # -----------------------------
-                # PROGRAMA
-                # -----------------------------
-                programa_nome = normalizar_programa(r["programa_raw"])
-
-                cod_programa = programas_map.get(programa_nome)
-
-                if cod_programa is None:
-                    row_prog = await conn.fetchrow(
-                        """
-                        INSERT INTO programas (nome_programa)
-                        VALUES ($1)
-                        RETURNING codigo
-                        """,
-                        programa_nome
-                    )
-                    cod_programa = row_prog["codigo"]
-                    programas_map[programa_nome] = cod_programa
-
-                # -----------------------------
-                # FINANCIAMENTO
-                # -----------------------------
-                cod_financiamento = None
-
-                if r["financiamento_raw"]:
-                    fin_nome = normalizar_financiamento_planejamento(r["financiamento_raw"])
-
-                    cod_financiamento = financiamentos_map.get(fin_nome)
-
-                    if cod_financiamento is None:
-                        row_fin = await conn.fetchrow(
-                            """
-                            INSERT INTO financiamento (nome_financiamento)
-                            VALUES ($1)
-                            RETURNING codigo
-                            """,
-                            fin_nome
-                        )
-                        cod_financiamento = row_fin["codigo"]
-                        financiamentos_map[fin_nome] = cod_financiamento
-
                 ano = lote["ano_referencia"]
                 cr = r["cr_raw"]
 
+                cr_info = cr_map.get(cr)
+
+                if cr_info is None:
+                    problemas.append({
+                        "linha": r["linha_numero"],
+                        "cr": cr,
+                        "erro": "CR não cadastrado em cr_planejamento"
+                    })
+                    continue
+
+                cod_programa = cr_info["cod_programa"]
+                cod_modalidade = cr_info["cod_modalidade"]
+                cod_formato = cr_info["cod_formato"]
+                cod_financiamento = cr_info["cod_financiamento"]
+
                 # -----------------------------
-                # UO VIA ARQUIVO (prioridade) / CR (fallback)
+                # UO VIA ARQUIVO + VALIDAÇÃO CR × UO
                 # -----------------------------
                 cod_uo = None
                 valor_uo_raw = r["cod_uo_raw"]
@@ -974,48 +1014,26 @@ async def processar_planejamento(request: Request, lote_id: int):
                     if s_uo and s_uo.lower() != "nan":
                         chave_uo = str(int(float(s_uo)))
                         cod_uo = uo_map.get(chave_uo)
+
+                if cod_uo is None:
+                    problemas.append({
+                        "linha": r["linha_numero"],
+                        "cr": cr,
+                        "cod_uo_raw": valor_uo_raw,
+                        "erro": "UO do arquivo não encontrada na tabela uo"
+                    })
+                    continue
+
+                if (cr, cod_uo) not in cr_uo_set:
+                    problemas.append({
+                        "linha": r["linha_numero"],
+                        "cr": cr,
+                        "cod_uo": cod_uo,
+                        "erro": "Vínculo CR × UO não cadastrado em cr_planejamento_uo"
+                    })
+                    continue
                 
-                # fallback: se não encontrou UO pelo arquivo, tenta pelo CR
-                if cod_uo is None and cr:
-                    cod_uo = cr_uo_map.get(cr)
                 
-                # -----------------------------
-                # MODALIDADE
-                # -----------------------------
-
-                cod_modalidade = None
-                cod_modalidade_raw = r["cod_modalidade_raw"] if "cod_modalidade_raw" in r else None
-
-                if cod_modalidade_raw is not None:
-                    try:
-                        cod_modalidade_tmp = int(float(str(cod_modalidade_raw).strip()))
-                        existe_mod = await conn.fetchval(
-                            "SELECT codigo FROM modalidade WHERE codigo = $1",
-                            cod_modalidade_tmp
-                        )
-                        if existe_mod:
-                            cod_modalidade = cod_modalidade_tmp
-                    except Exception:
-                        pass
-
-                # 2) se não conseguiu pelo código, tenta pelo nome
-                if cod_modalidade is None:
-                    modalidade_nome = (r["modalidade_raw"] or "").strip().upper()
-
-                    if modalidade_nome:
-                        cod_modalidade = modalidade_map.get(modalidade_nome)
-
-                        if cod_modalidade is None:
-                            row_mod = await conn.fetchrow(
-                                """
-                                INSERT INTO modalidade (nome)
-                                VALUES ($1)
-                                RETURNING codigo
-                                """,
-                                modalidade_nome
-                            )
-                            cod_modalidade = row_mod["codigo"]
-                            modalidade_map[modalidade_nome] = cod_modalidade
 
                 # -----------------------------
                 # OFERTA
@@ -1027,6 +1045,7 @@ async def processar_planejamento(request: Request, lote_id: int):
                     cr,
                     cod_uo or 0,
                     cod_modalidade or 0,
+                    cod_formato or 0,
                 )
 
                 cod_oferta = ofertas_map.get(chave_oferta)
@@ -1042,6 +1061,7 @@ async def processar_planejamento(request: Request, lote_id: int):
                         AND COALESCE(cr, '') = COALESCE($4, '')
                         AND COALESCE(cod_uo, 0) = COALESCE($5, 0)
                         AND COALESCE(cod_modalidade, 0) = COALESCE($6, 0)
+                        AND COALESCE(cod_formato, 0) = COALESCE($7, 0)
                         LIMIT 1
                         """,
                         cod_programa,
@@ -1049,7 +1069,8 @@ async def processar_planejamento(request: Request, lote_id: int):
                         ano,
                         cr,
                         cod_uo,
-                        cod_modalidade
+                        cod_modalidade,
+                        cod_formato
                     )
 
                     if oferta_existente:
@@ -1063,9 +1084,10 @@ async def processar_planejamento(request: Request, lote_id: int):
                                 ano,
                                 cr,
                                 cod_uo,
-                                cod_modalidade
+                                cod_modalidade,
+                                cod_formato
                             )
-                            VALUES ($1, $2, $3, $4, $5, $6)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7)
                             RETURNING codigo
                             """,
                             cod_programa,
@@ -1073,7 +1095,8 @@ async def processar_planejamento(request: Request, lote_id: int):
                             ano,
                             cr,
                             cod_uo,
-                            cod_modalidade
+                            cod_modalidade,
+                            cod_formato
                         )
                         cod_oferta = oferta["codigo"]
 
@@ -1224,6 +1247,9 @@ async def processar_planejamento(request: Request, lote_id: int):
             lote_id
         )
 
+        print("❌ TOTAL PROBLEMAS:", len(problemas), flush=True)
+        print("❌ AMOSTRA PROBLEMAS:", problemas[:10], flush=True)
+
         return {
             "ok": True,
             "lote_id": lote_id,
@@ -1335,6 +1361,14 @@ async def importar_matriculas_realizadas(
 
             lote_id = lote["id"]
 
+            cr_formato_map = {
+                row["cr"]: row["cod_formato"]
+                for row in await conn.fetch("""
+                    SELECT cr, cod_formato
+                    FROM cr_planejamento
+                """)
+            }
+
             registros = []
             total_validas = 0
             total_invalidas = 0
@@ -1375,9 +1409,15 @@ async def importar_matriculas_realizadas(
                 cod_uo = None
                 cod_modalidade = None
                 cod_programa = None
+                cod_formato = None
 
                 if not cr:
                     erros.append("CR não informado")
+                
+                if cr:
+                    cod_formato = cr_formato_map.get(cr)
+                    if cod_formato is None:
+                        erros.append("CR não cadastrado em cr_planejamento ou sem cod_formato")
 
                 try:
                     valor = norm_int(valor_raw)
@@ -1433,6 +1473,7 @@ async def importar_matriculas_realizadas(
                     cod_uo,
                     cod_modalidade,
                     cod_programa,
+                    cod_formato,
                     programa,
                     None,
                     status,
@@ -1453,13 +1494,14 @@ async def importar_matriculas_realizadas(
                         cod_uo,
                         cod_modalidade,
                         cod_programa,
+                        cod_formato,
                         programa,
                         cod_oferta_resolvido,
                         status,
                         erro
                     )
                     VALUES (
-                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
+                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15
                     )
                     """,
                     registros
@@ -1603,6 +1645,7 @@ async def processar_matriculas_realizadas(request: Request, lote_id: int):
                  AND COALESCE(o.cod_uo, 0) = COALESCE(s.cod_uo, 0)
                  AND COALESCE(o.cod_modalidade, 0) = COALESCE(s.cod_modalidade, 0)
                  AND COALESCE(o.cod_programa, 0) = COALESCE(s.cod_programa, 0)
+                 AND COALESCE(o.cod_formato, 0) = COALESCE(s.cod_formato, 0)
                 WHERE s.id = ANY($1::bigint[])
                   AND s.status = 'PENDENTE'
             )
@@ -1630,6 +1673,7 @@ async def processar_matriculas_realizadas(request: Request, lote_id: int):
                  AND COALESCE(o.cod_uo, 0) = COALESCE(s.cod_uo, 0)
                  AND COALESCE(o.cod_modalidade, 0) = COALESCE(s.cod_modalidade, 0)
                  AND COALESCE(o.cod_programa, 0) = COALESCE(s.cod_programa, 0)
+                 AND COALESCE(o.cod_formato, 0) = COALESCE(s.cod_formato, 0)
                 WHERE s.id = ANY($1::bigint[])
                   AND s.status = 'PENDENTE'
                 GROUP BY s.id
@@ -1641,29 +1685,6 @@ async def processar_matriculas_realizadas(request: Request, lote_id: int):
             WHERE s.id = c.staging_id
               AND c.qtd > 1
               AND s.status = 'PENDENTE'
-            """,
-            ids
-        )
-
-        await conn.execute(
-            """
-            INSERT INTO ofertas_programas (
-                cr,
-                ano,
-                cod_uo,
-                cod_modalidade,
-                cod_programa
-            )
-            SELECT DISTINCT
-                s.cr,
-                s.ano,
-                s.cod_uo,
-                s.cod_modalidade,
-                s.cod_programa
-            FROM importacao_matriculas_staging s
-            WHERE s.id = ANY($1::bigint[])
-            AND s.status = 'PENDENTE'
-            ON CONFLICT DO NOTHING
             """,
             ids
         )
@@ -1683,6 +1704,18 @@ async def processar_matriculas_realizadas(request: Request, lote_id: int):
             AND COALESCE(o.cod_uo,0)=COALESCE(s.cod_uo,0)
             AND COALESCE(o.cod_modalidade,0)=COALESCE(s.cod_modalidade,0)
             AND COALESCE(o.cod_programa,0)=COALESCE(s.cod_programa,0)
+            AND COALESCE(o.cod_formato,0)=COALESCE(s.cod_formato,0)
+            """,
+            ids
+        )
+
+        await conn.execute(
+            """
+            UPDATE importacao_matriculas_staging
+            SET status = 'ERRO',
+                erro = 'Oferta não encontrada para ano, CR, UO, programa, modalidade e formato.'
+            WHERE id = ANY($1::bigint[])
+            AND status = 'PENDENTE'
             """,
             ids
         )
@@ -1837,6 +1870,14 @@ async def importar_receita(request: Request, arquivo: UploadFile = File(...), an
             )
             lote_id = lote["id"]
 
+            cr_formato_map = {
+                row["cr"]: row["cod_formato"]
+                for row in await conn.fetch("""
+                    SELECT cr, cod_formato
+                    FROM cr_planejamento
+                """)
+            }
+
             registros = []
             total_validas = 0
             total_invalidas = 0
@@ -1876,9 +1917,18 @@ async def importar_receita(request: Request, arquivo: UploadFile = File(...), an
                 cod_uo = None
                 cod_modalidade = None
                 cod_programa = None
+                cod_formato = None
 
                 if not cr:
                     erros.append("CR não informado")
+                
+                if cr:
+                    cod_formato = cr_formato_map.get(cr)
+
+                    if cod_formato is None:
+                        erros.append(
+                            "CR não cadastrado em cr_planejamento ou sem cod_formato"
+                        )
 
                 try:
                     if pd.isna(valor_raw) or valor_raw in ("", None):
@@ -1943,6 +1993,7 @@ async def importar_receita(request: Request, arquivo: UploadFile = File(...), an
                     cod_uo,
                     cod_modalidade,
                     cod_programa,
+                    cod_formato,
                     programa,
                     None,  # cod_oferta_resolvido
                     status,
@@ -1963,13 +2014,14 @@ async def importar_receita(request: Request, arquivo: UploadFile = File(...), an
                         cod_uo,
                         cod_modalidade,
                         cod_programa,
+                        cod_formato,
                         programa,
                         cod_oferta_resolvido,
                         status,
                         erro
                     )
                     VALUES (
-                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
+                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15
                     )
                     """,
                     registros
@@ -2113,6 +2165,7 @@ async def processar_receita(request: Request, lote_id: int):
                     AND COALESCE(o.cod_uo, 0) = COALESCE(s.cod_uo, 0)
                     AND COALESCE(o.cod_modalidade, 0) = COALESCE(s.cod_modalidade, 0)
                     AND COALESCE(o.cod_programa, 0) = COALESCE(s.cod_programa, 0)
+                    AND COALESCE(o.cod_formato, 0) = COALESCE(s.cod_formato, 0)
                 WHERE s.id = ANY($1::bigint[])
                     AND s.status = 'PENDENTE'
             )
@@ -2129,66 +2182,6 @@ async def processar_receita(request: Request, lote_id: int):
 
         await conn.execute(
             """
-            INSERT INTO ofertas_programas (
-                cr,
-                ano,
-                cod_uo,
-                cod_modalidade,
-                cod_programa
-            )
-            SELECT DISTINCT
-                s.cr,
-                s.ano,
-                s.cod_uo,
-                s.cod_modalidade,
-                s.cod_programa
-            FROM importacao_receita_staging s
-            WHERE s.id = ANY($1::bigint[])
-            AND s.status = 'PENDENTE'
-            AND NOT EXISTS (
-                SELECT 1
-                FROM ofertas_programas o
-                WHERE o.ano = s.ano
-                    AND o.cr = s.cr
-                    AND COALESCE(o.cod_uo, 0) = COALESCE(s.cod_uo, 0)
-                    AND COALESCE(o.cod_modalidade, 0) = COALESCE(s.cod_modalidade, 0)
-                    AND COALESCE(o.cod_programa, 0) = COALESCE(s.cod_programa, 0)
-                )
-            """,
-            ids
-        )
-
-        await conn.execute(
-            """
-            WITH candidatos AS (
-                SELECT
-                    s.id AS staging_id,
-                    o.codigo AS cod_oferta,
-                    COUNT(*) OVER (PARTITION BY s.id) AS qtd
-                FROM importacao_receita_staging s
-                JOIN ofertas_programas o
-                ON o.ano = s.ano
-                AND o.cr = s.cr
-                AND COALESCE(o.cod_uo, 0) = COALESCE(s.cod_uo, 0)
-                AND COALESCE(o.cod_modalidade, 0) = COALESCE(s.cod_modalidade, 0)
-                AND COALESCE(o.cod_programa, 0) = COALESCE(s.cod_programa, 0)
-                WHERE s.id = ANY($1::bigint[])
-                AND s.status = 'PENDENTE'
-            )
-            UPDATE importacao_receita_staging s
-            SET cod_oferta_resolvido = c.cod_oferta,
-                status = 'RESOLVIDO',
-                erro = NULL
-            FROM candidatos c
-            WHERE s.id = c.staging_id
-            AND c.qtd = 1
-            """,
-            ids
-        )
-
-        # AMBÍGUO: mais de uma oferta para a combinação exata
-        await conn.execute(
-            """
             WITH candidatos AS (
                 SELECT
                     s.id AS staging_id,
@@ -2200,6 +2193,7 @@ async def processar_receita(request: Request, lote_id: int):
                     AND COALESCE(o.cod_uo, 0) = COALESCE(s.cod_uo, 0)
                     AND COALESCE(o.cod_modalidade, 0) = COALESCE(s.cod_modalidade, 0)
                     AND COALESCE(o.cod_programa, 0) = COALESCE(s.cod_programa, 0)
+                    AND COALESCE(o.cod_formato, 0) = COALESCE(s.cod_formato, 0)
                 WHERE s.id = ANY($1::bigint[])
                     AND s.status = 'PENDENTE'
                 GROUP BY s.id
@@ -2220,7 +2214,7 @@ async def processar_receita(request: Request, lote_id: int):
             """
             UPDATE importacao_receita_staging
             SET status = 'ERRO',
-                erro = 'Nenhuma oferta encontrada para os critérios informados.'
+                erro = 'Oferta não encontrada para ano, CR, UO, programa, modalidade e formato.'
             WHERE id = ANY($1::bigint[])
                 AND status = 'PENDENTE'
             """,
@@ -2366,6 +2360,14 @@ async def importar_hora_aluno(request: Request, arquivo: UploadFile = File(...),
             )
             lote_id = lote["id"]
 
+            cr_formato_map = {
+                row["cr"]: row["cod_formato"]
+                for row in await conn.fetch("""
+                    SELECT cr, cod_formato
+                    FROM cr_planejamento
+                """)
+            }
+
             registros = []
             total_validas = 0
             total_invalidas = 0
@@ -2413,9 +2415,18 @@ async def importar_hora_aluno(request: Request, arquivo: UploadFile = File(...),
                 cod_uo = None
                 cod_modalidade = None
                 cod_programa = None
+                cod_formato = None
 
                 if not cr:
                     erros.append("CR não informado")
+                
+                if cr:
+                    cod_formato = cr_formato_map.get(cr)
+
+                    if cod_formato is None:
+                        erros.append(
+                            "CR não cadastrado em cr_planejamento ou sem cod_formato"
+                        )
 
                 try:
                     if pd.isna(valor_raw) or valor_raw in ("", None):
@@ -2496,6 +2507,7 @@ async def importar_hora_aluno(request: Request, arquivo: UploadFile = File(...),
                 cod_modalidade,
                 modalidade,
                 cod_programa,
+                cod_formato,
                 programa,
                 None,  # cod_oferta_resolvido
                 status,
@@ -2522,6 +2534,7 @@ async def importar_hora_aluno(request: Request, arquivo: UploadFile = File(...),
                         cod_modalidade,
                         modalidade,
                         cod_programa,
+                        cod_formato,
                         programa,
                         cod_oferta_resolvido,
                         status,
@@ -2529,7 +2542,7 @@ async def importar_hora_aluno(request: Request, arquivo: UploadFile = File(...),
                     )
                     VALUES (
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-                        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20
+                        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21
                     )
                     """,
                     registros
@@ -2673,6 +2686,7 @@ async def processar_hora_aluno(request: Request, lote_id: int):
                     AND COALESCE(o.cod_uo, 0) = COALESCE(s.cod_uo, 0)
                     AND COALESCE(o.cod_modalidade, 0) = COALESCE(s.cod_modalidade, 0)
                     AND COALESCE(o.cod_programa, 0) = COALESCE(s.cod_programa, 0)
+                    AND COALESCE(o.cod_formato, 0) = COALESCE(s.cod_formato, 0)
                 WHERE s.id = ANY($1::bigint[])
                     AND s.status = 'PENDENTE'
             )
@@ -2683,37 +2697,6 @@ async def processar_hora_aluno(request: Request, lote_id: int):
             FROM candidatos c
             WHERE s.id = c.staging_id
                 AND c.qtd = 1
-            """,
-            ids
-        )
-
-        await conn.execute(
-            """
-            INSERT INTO ofertas_programas (
-                cr,
-                ano,
-                cod_uo,
-                cod_modalidade,
-                cod_programa
-            )
-            SELECT DISTINCT
-                s.cr,
-                s.ano,
-                s.cod_uo,
-                s.cod_modalidade,
-                s.cod_programa
-            FROM importacao_ha_staging s
-            WHERE s.id = ANY($1::bigint[])
-            AND s.status = 'PENDENTE'
-            AND NOT EXISTS (
-                SELECT 1
-                FROM ofertas_programas o
-                WHERE o.ano = s.ano
-                    AND o.cr = s.cr
-                    AND COALESCE(o.cod_uo, 0) = COALESCE(s.cod_uo, 0)
-                    AND COALESCE(o.cod_modalidade, 0) = COALESCE(s.cod_modalidade, 0)
-                    AND COALESCE(o.cod_programa, 0) = COALESCE(s.cod_programa, 0)
-                )
             """,
             ids
         )
@@ -2732,6 +2715,7 @@ async def processar_hora_aluno(request: Request, lote_id: int):
                 AND COALESCE(o.cod_uo, 0) = COALESCE(s.cod_uo, 0)
                 AND COALESCE(o.cod_modalidade, 0) = COALESCE(s.cod_modalidade, 0)
                 AND COALESCE(o.cod_programa, 0) = COALESCE(s.cod_programa, 0)
+                AND COALESCE(o.cod_formato, 0) = COALESCE(s.cod_formato, 0)
                 WHERE s.id = ANY($1::bigint[])
                 AND s.status = 'PENDENTE'
             )
@@ -2746,41 +2730,12 @@ async def processar_hora_aluno(request: Request, lote_id: int):
             ids
         )
 
-        # AMBÍGUO: mais de uma oferta para a combinação exata
-        await conn.execute(
-            """
-            WITH candidatos AS (
-                SELECT
-                    s.id AS staging_id,
-                    COUNT(*) AS qtd
-                FROM importacao_ha_staging s
-                JOIN ofertas_programas o
-                    ON o.ano = s.ano
-                    AND o.cr = s.cr
-                    AND COALESCE(o.cod_uo, 0) = COALESCE(s.cod_uo, 0)
-                    AND COALESCE(o.cod_modalidade, 0) = COALESCE(s.cod_modalidade, 0)
-                    AND COALESCE(o.cod_programa, 0) = COALESCE(s.cod_programa, 0)
-                WHERE s.id = ANY($1::bigint[])
-                    AND s.status = 'PENDENTE'
-                GROUP BY s.id
-            )
-            UPDATE importacao_ha_staging s
-            SET status = 'AMBIGUO',
-                erro = 'Mais de uma oferta encontrada para a combinação exata informada.'
-            FROM candidatos c
-            WHERE s.id = c.staging_id
-                AND c.qtd > 1
-                AND s.status = 'PENDENTE'
-            """,
-            ids
-        )
-
         # ERRO: ainda pendente e sem match
         await conn.execute(
             """
             UPDATE importacao_ha_staging
             SET status = 'ERRO',
-                erro = 'Nenhuma oferta encontrada para os critérios informados.'
+                erro = 'Oferta não encontrada para ano, CR, UO, programa, modalidade e formato.'
             WHERE id = ANY($1::bigint[])
                 AND status = 'PENDENTE'
             """,
@@ -11392,10 +11347,13 @@ async def regioes_ranking(
     ),
 
     ultimo_lote_planejamento AS (
-        SELECT MAX(lote_id) AS lote_id
-        FROM planejamento_staging
-        WHERE flag_valida IS DISTINCT FROM FALSE
-        AND tipo = 'META'
+        SELECT MAX(ps.lote_id) AS lote_id
+        FROM planejamento_staging ps
+        JOIN planejamento_import_lotes pil
+        ON pil.id = ps.lote_id
+        WHERE ps.flag_valida IS DISTINCT FROM FALSE
+        AND ps.tipo = 'META'
+        AND pil.ano_referencia = $1
     ),
 
     meta AS (
@@ -11536,8 +11494,19 @@ async def detalhamento_regiao(
         CASE WHEN 12 = ANY($2::int[]) THEN COALESCE(dez,0) ELSE 0 END
     """
 
+    mes_final = max(ids_meses) if ids_meses else None
+
     sql = f"""
-    WITH realizado AS (
+    WITH lote_planejamento AS (
+        SELECT id
+        FROM planejamento_import_lotes
+        WHERE CAST(ano_referencia AS integer) = $1
+        AND status_processamento = 'processado'
+        ORDER BY id DESC
+        LIMIT 1
+    ),
+    
+    realizado AS (
         SELECT
             u.codigo AS cod_uo,
             UPPER(TRIM(u.nome)) AS unidade,
@@ -11587,10 +11556,14 @@ async def detalhamento_regiao(
 
             FROM planejamento_staging ps
 
+            JOIN lote_planejamento lp
+                ON lp.id = ps.lote_id
+
             LEFT JOIN uo u
                 ON u.codigo = NULLIF(ps.cod_uo_raw, '')::int
             WHERE ps.flag_valida IS DISTINCT FROM FALSE
             AND ps.tipo = 'META'
+
             AND ps.cod_uo_raw IS NOT NULL
             AND NULLIF(ps.cod_uo_raw, '') IS NOT NULL
             AND (
@@ -11626,15 +11599,35 @@ async def detalhamento_regiao(
         GROUP BY cod_uo
     ),
 
-    turmas_ativas AS (
+    turmas_status AS (
         SELECT
-            t.cod_uo,
-            COUNT(DISTINCT t.codigo) AS turmas_ativas
+            u.codigo AS cod_uo,
+
+            COUNT(DISTINCT t.codigo) FILTER (
+                WHERE t.data_inicio >= MAKE_DATE($1::int, (SELECT MIN(m) FROM unnest($2::int[]) m), 1)
+                AND t.data_inicio <= (
+                        MAKE_DATE($1::int, (SELECT MAX(m) FROM unnest($2::int[]) m), 1)
+                        + INTERVAL '1 month - 1 day'
+                )::date
+            ) AS turmas_ativas,
+
+            COUNT(DISTINCT t.codigo) FILTER (
+                WHERE t.data_inicio <= (
+                    MAKE_DATE($1::int, $4::int, 1)
+                    + INTERVAL '1 month - 1 day'
+                )::date
+            ) AS turmas_acumulado
+
         FROM turmas t
-        JOIN uo u ON u.codigo = t.cod_uo
-        JOIN subregioes s ON s.codigo = u.cod_subregiao
+        JOIN uo u
+            ON u.codigo = t.cod_uo
+        JOIN subregioes s
+            ON s.codigo = u.cod_subregiao
+
+        WHERE t.ano_referencia = $1
         AND ($3::int IS NULL OR s.codigo_regiao = $3)
-        GROUP BY t.cod_uo
+
+        GROUP BY u.codigo
     )
 
     SELECT
@@ -11645,7 +11638,8 @@ async def detalhamento_regiao(
 
         COALESCE(realizado.matriculas_real, 0) AS matriculas_real,
         COALESCE(meta.matriculas_meta, 0) AS matriculas_meta,
-        COALESCE(ta.turmas_ativas, 0) AS turmas_ativas,
+        COALESCE(ts.turmas_ativas, 0) AS turmas_ativas,
+        COALESCE(ts.turmas_acumulado, 0) AS turmas_acumulado,
 
         CASE
             WHEN COALESCE(meta.matriculas_meta, 0) > 0
@@ -11685,8 +11679,11 @@ async def detalhamento_regiao(
     FULL JOIN meta
         USING (cod_uo)
 
-    LEFT JOIN turmas_ativas ta
-        ON ta.cod_uo = COALESCE(realizado.cod_uo, meta.cod_uo)
+    LEFT JOIN turmas_status ts
+        ON ts.cod_uo = COALESCE(realizado.cod_uo, meta.cod_uo)
+    
+    ORDER BY
+        COALESCE(realizado.unidade, meta.unidade)
     """
 
     async with pool.acquire() as conn:
@@ -11694,13 +11691,20 @@ async def detalhamento_regiao(
             sql,
             ano,
             ids_meses,
-            regiao
+            regiao,
+            mes_final
+        )
+    
+    resultado = [dict(r) for r in rows]
+
+    for r in resultado[:10]:
+        print(
+            r["unidade"],
+            "ATIVAS =", r.get("turmas_ativas"),
+            "ACUMULADO =", r.get("turmas_acumulado")
         )
 
-    return [
-        dict(r)
-        for r in rows
-    ]
+    return resultado
 
 @router.get("/performance/subregioes/detalhe")
 async def performance_subregioes_detalhe(
@@ -12146,8 +12150,21 @@ async def importar_data(request: Request, arquivo: UploadFile = File(...)):
                     "SENAI_CONDICAO_ALUNO_CURSO"
                 ))
 
-                data_inicio = norm_date(v(row, "data_inicio_turma", "Data Início Turma", "DTINICIAL"))
-                data_fim = norm_date(v(row, "data_final_turma", "Data Final Turma", "DTFINAL"))
+                data_inicio = norm_date(v(
+                    row,
+                    "data_inicio_turma",
+                    "Data Início Turma",
+                    "DTINICIAL"
+                ))
+
+                data_fim = norm_date(v(
+                    row,
+                    "data_fim_turma",
+                    "data_final_turma",
+                    "Data Fim Turma",
+                    "Data Final Turma",
+                    "DTFINAL"
+                ))
                 data_ini_contratoapr = norm_date(v(
                     row,
                     "data_inicio_contrato",
@@ -14161,3 +14178,1391 @@ async def ultimo_lote_data(request: Request):
         "data_importacao": row["data_importacao"],
         "status": row["status_processamento"]
     }
+
+@router.get("/executivo/subregioes/ranking")
+async def executivo_subregioes_ranking(
+    request: Request,
+    ano: int | None = None,
+    meses: str | None = None,
+    subregiao: str | None = None
+):
+    pool = request.app.state.pool
+
+    meses_lista = []
+
+    if meses:
+        meses_lista = [
+            int(m)
+            for m in meses.split(",")
+            if m.strip().isdigit()
+        ]
+
+    sql = """
+        WITH base AS (
+            SELECT
+                s.codigo AS cod_subregiao,
+                s.nome AS subregiao,
+                COALESCE(SUM(rp.matriculas_real), 0) AS matriculas,
+                COALESCE(SUM(rp.ha_real), 0) AS hora_aluno,
+                COALESCE(SUM(rp.receita_real), 0) AS receita,
+                COUNT(DISTINCT rp.cod_oferta) AS turmas
+            FROM subregioes s
+            LEFT JOIN uo u
+                ON u.cod_subregiao = s.codigo
+            LEFT JOIN ofertas_programas o
+                ON o.cod_uo = u.codigo
+            LEFT JOIN realizado_programas rp
+                ON rp.cod_oferta = o.codigo
+                AND ($1::int IS NULL OR rp.ano = $1)
+                AND (
+                        $2::int[] IS NULL
+                        OR rp.mes = ANY($2::int[])
+                )
+            GROUP BY
+                s.codigo,
+                s.nome
+        ),
+        ultimo_lote_planejamento AS (
+            SELECT MAX(lote_id) AS lote_id
+            FROM planejamento_staging
+            WHERE flag_valida IS DISTINCT FROM FALSE
+            AND tipo = 'META'
+        ),
+
+        meta AS (
+            SELECT
+                UPPER(TRIM(ps.subregiao)) AS subregiao,
+                SUM(
+                    CASE WHEN 1 = ANY($2::int[]) THEN COALESCE(ps.jan,0) ELSE 0 END +
+                    CASE WHEN 2 = ANY($2::int[]) THEN COALESCE(ps.fev,0) ELSE 0 END +
+                    CASE WHEN 3 = ANY($2::int[]) THEN COALESCE(ps.mar,0) ELSE 0 END +
+                    CASE WHEN 4 = ANY($2::int[]) THEN COALESCE(ps.abr,0) ELSE 0 END +
+                    CASE WHEN 5 = ANY($2::int[]) THEN COALESCE(ps.mai,0) ELSE 0 END +
+                    CASE WHEN 6 = ANY($2::int[]) THEN COALESCE(ps.jun,0) ELSE 0 END +
+                    CASE WHEN 7 = ANY($2::int[]) THEN COALESCE(ps.jul,0) ELSE 0 END +
+                    CASE WHEN 8 = ANY($2::int[]) THEN COALESCE(ps.ago,0) ELSE 0 END +
+                    CASE WHEN 9 = ANY($2::int[]) THEN COALESCE(ps.set_,0) ELSE 0 END +
+                    CASE WHEN 10 = ANY($2::int[]) THEN COALESCE(ps.out_,0) ELSE 0 END +
+                    CASE WHEN 11 = ANY($2::int[]) THEN COALESCE(ps.nov,0) ELSE 0 END +
+                    CASE WHEN 12 = ANY($2::int[]) THEN COALESCE(ps.dez,0) ELSE 0 END
+                ) AS matriculas_meta
+            FROM planejamento_staging ps
+            JOIN ultimo_lote_planejamento ul
+                ON ul.lote_id = ps.lote_id
+            WHERE ps.flag_valida IS DISTINCT FROM FALSE
+            AND ps.tipo = 'META'
+            AND UPPER(TRIM(ps.conta)) IN ('MATRÍCULAS', 'MATRICULAS')
+            AND ps.subregiao IS NOT NULL
+            AND TRIM(ps.subregiao) <> ''
+            GROUP BY UPPER(TRIM(ps.subregiao))
+        ),
+        modalidade_rank AS (
+            SELECT
+                s.codigo AS cod_subregiao,
+                m.nome AS modalidade,
+                COALESCE(SUM(rp.matriculas_real), 0) AS matriculas_modalidade,
+                ROW_NUMBER() OVER (
+                    PARTITION BY s.codigo
+                    ORDER BY COALESCE(SUM(rp.matriculas_real), 0) DESC
+                ) AS rn
+            FROM subregioes s
+            LEFT JOIN uo u
+                ON u.cod_subregiao = s.codigo
+            LEFT JOIN ofertas_programas o
+                ON o.cod_uo = u.codigo
+            LEFT JOIN modalidade m
+                ON m.codigo = o.cod_modalidade
+            LEFT JOIN realizado_programas rp
+                ON rp.cod_oferta = o.codigo
+                AND ($1::int IS NULL OR rp.ano = $1)
+                AND (
+                        $2::int[] IS NULL
+                        OR rp.mes = ANY($2::int[])
+                )
+            GROUP BY
+                s.codigo,
+                m.nome
+        ),
+        ranked AS (
+            SELECT
+                b.*,
+                COALESCE(mt.matriculas_meta, 0) AS matriculas_meta,
+                COALESCE(mr.modalidade, '—') AS modalidade_lider,
+                ROW_NUMBER() OVER (
+                    ORDER BY b.matriculas DESC, b.subregiao ASC
+                ) AS rank_real
+            FROM base b
+            LEFT JOIN modalidade_rank mr
+                ON mr.cod_subregiao = b.cod_subregiao
+                AND mr.rn = 1
+            LEFT JOIN meta mt
+                ON mt.subregiao = UPPER(TRIM(b.subregiao))
+        )
+        SELECT *
+        FROM ranked
+        WHERE (
+            $3::text IS NULL
+            OR subregiao = $3
+        )
+        ORDER BY rank_real ASC
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            sql,
+            ano,
+            meses_lista if meses_lista else None,
+            subregiao
+        )
+
+    resultado = []
+
+    for i, r in enumerate(rows):
+        matriculas = r["matriculas"] or 0
+        hora_aluno = r["hora_aluno"] or 0
+        receita = r["receita"] or 0
+        turmas = r["turmas"] or 0
+        matriculas_meta = r["matriculas_meta"] or 0
+
+        percentual_meta = (
+            (matriculas / matriculas_meta) * 100
+            if matriculas_meta > 0
+            else None
+        )
+
+        if matriculas_meta == 0 and matriculas > 0:
+            status = "Realizado sem meta"
+            classe = "sem-meta"
+        elif matriculas_meta == 0 and matriculas == 0:
+            status = "Sem movimento"
+            classe = "sem-dados"
+        elif percentual_meta >= 100:
+            status = "Meta atingida"
+            classe = "ok"
+        elif percentual_meta >= 75:
+            status = "No caminho"
+            classe = "no-caminho"
+        elif percentual_meta >= 51:
+            status = "Atenção"
+            classe = "atencao"
+        else:
+            status = "Crítico"
+            classe = "critico"
+
+        resultado.append({
+            "rank": r["rank_real"],
+            "cod_subregiao": r["cod_subregiao"],
+            "subregiao": r["subregiao"],
+            "modalidade_lider": r["modalidade_lider"] or "—",
+            "matriculas": matriculas,
+            "hora_aluno": hora_aluno,
+            "receita": float(receita),
+            "turmas": turmas,
+            "status": status,
+            "classe": classe
+        })
+
+    return resultado
+
+@router.get("/executivo/subregioes/resumo-modalidades")
+async def executivo_subregioes_resumo_modalidades(
+    request: Request,
+    ano: int | None = None,
+    meses: str | None = None,
+    subregiao: str | None = None
+):
+    pool = request.app.state.pool
+
+    meses_lista = []
+
+    if meses:
+        meses_lista = [
+            int(m)
+            for m in meses.split(",")
+            if m.strip().isdigit()
+        ]
+
+    sql = """
+        SELECT
+            COALESCE(m.nome, 'Sem modalidade') AS modalidade,
+            COALESCE(SUM(rp.matriculas_real), 0) AS matriculas,
+            COALESCE(SUM(rp.ha_real), 0) AS hora_aluno,
+            COALESCE(SUM(rp.receita_real), 0) AS receita,
+            COUNT(DISTINCT rp.cod_oferta) AS turmas
+        FROM subregioes s
+        LEFT JOIN uo u
+            ON u.cod_subregiao = s.codigo
+        LEFT JOIN ofertas_programas o
+            ON o.cod_uo = u.codigo
+        LEFT JOIN modalidade m
+            ON m.codigo = o.cod_modalidade
+        LEFT JOIN realizado_programas rp
+            ON rp.cod_oferta = o.codigo
+            AND ($1::int IS NULL OR rp.ano = $1)
+            AND (
+                $2::int[] IS NULL
+                OR rp.mes = ANY($2::int[])
+            )
+        WHERE (
+            $3::text IS NULL
+            OR s.nome = $3
+        )
+        GROUP BY
+            COALESCE(m.nome, 'Sem modalidade')
+        HAVING
+            COALESCE(SUM(rp.matriculas_real), 0) > 0
+            OR COALESCE(SUM(rp.ha_real), 0) > 0
+            OR COALESCE(SUM(rp.receita_real), 0) > 0
+            OR COUNT(DISTINCT rp.cod_oferta) > 0
+        ORDER BY
+            matriculas DESC
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            sql,
+            ano,
+            meses_lista if meses_lista else None,
+            subregiao
+        )
+
+    return [
+        {
+            "modalidade": r["modalidade"],
+            "matriculas": r["matriculas"] or 0,
+            "hora_aluno": r["hora_aluno"] or 0,
+            "receita": float(r["receita"] or 0),
+            "turmas": r["turmas"] or 0
+        }
+        for r in rows
+    ]
+
+@router.get("/executivo/subregioes/detalhamento")
+async def executivo_subregioes_detalhamento(
+    request: Request,
+    subregiao: str,
+    ano: int | None = None,
+    meses: str | None = None
+):
+    pool = request.app.state.pool
+
+    meses_lista = [
+        int(m)
+        for m in (meses or "").split(",")
+        if m.strip().isdigit()
+    ]
+
+    meta_periodo = """
+        CASE WHEN 1 = ANY($3::int[]) THEN COALESCE(jan,0) ELSE 0 END +
+        CASE WHEN 2 = ANY($3::int[]) THEN COALESCE(fev,0) ELSE 0 END +
+        CASE WHEN 3 = ANY($3::int[]) THEN COALESCE(mar,0) ELSE 0 END +
+        CASE WHEN 4 = ANY($3::int[]) THEN COALESCE(abr,0) ELSE 0 END +
+        CASE WHEN 5 = ANY($3::int[]) THEN COALESCE(mai,0) ELSE 0 END +
+        CASE WHEN 6 = ANY($3::int[]) THEN COALESCE(jun,0) ELSE 0 END +
+        CASE WHEN 7 = ANY($3::int[]) THEN COALESCE(jul,0) ELSE 0 END +
+        CASE WHEN 8 = ANY($3::int[]) THEN COALESCE(ago,0) ELSE 0 END +
+        CASE WHEN 9 = ANY($3::int[]) THEN COALESCE(set_,0) ELSE 0 END +
+        CASE WHEN 10 = ANY($3::int[]) THEN COALESCE(out_,0) ELSE 0 END +
+        CASE WHEN 11 = ANY($3::int[]) THEN COALESCE(nov,0) ELSE 0 END +
+        CASE WHEN 12 = ANY($3::int[]) THEN COALESCE(dez,0) ELSE 0 END
+    """
+
+    sql = f"""
+        WITH ultimo_lote_planejamento AS (
+            SELECT MAX(lote_id) AS lote_id
+            FROM planejamento_staging
+            WHERE flag_valida IS DISTINCT FROM FALSE
+              AND tipo = 'META'
+        ),
+
+        realizado AS (
+            SELECT
+                o.cod_modalidade AS cod_modalidade,
+                COALESCE(m.nome, 'Sem modalidade') AS modalidade,
+                COALESCE(SUM(rp.matriculas_real), 0) AS matriculas,
+                COALESCE(SUM(rp.ha_real), 0) AS hora_aluno,
+                COALESCE(SUM(rp.receita_real), 0) AS receita,
+                COUNT(DISTINCT rp.cod_oferta) AS turmas
+            FROM subregioes s
+            LEFT JOIN uo u
+                ON u.cod_subregiao = s.codigo
+            LEFT JOIN ofertas_programas o
+                ON o.cod_uo = u.codigo
+            LEFT JOIN modalidade m
+                ON m.codigo = o.cod_modalidade
+            LEFT JOIN realizado_programas rp
+                ON rp.cod_oferta = o.codigo
+               AND ($2::int IS NULL OR rp.ano = $2)
+               AND (
+                   $3::int[] IS NULL
+                   OR rp.mes = ANY($3::int[])
+               )
+            WHERE UPPER(TRIM(s.nome)) = UPPER(TRIM($1))
+            GROUP BY
+                o.cod_modalidade,
+                COALESCE(m.nome, 'Sem modalidade')
+        ),
+
+        meta AS (
+            SELECT
+                TRIM(ps.cod_modalidade_raw::text) AS cod_modalidade,
+                SUM({meta_periodo}) AS meta
+            FROM planejamento_staging ps
+            JOIN ultimo_lote_planejamento ul
+                ON ul.lote_id = ps.lote_id
+            WHERE ps.flag_valida IS DISTINCT FROM FALSE
+              AND ps.tipo = 'META'
+              AND UPPER(TRIM(ps.conta)) IN ('MATRÍCULAS', 'MATRICULAS')
+              AND UPPER(TRIM(ps.subregiao)) = UPPER(TRIM($1))
+            GROUP BY TRIM(ps.cod_modalidade_raw::text)
+        )
+
+        SELECT
+            r.modalidade,
+            r.matriculas,
+            COALESCE(mt.meta, 0) AS meta,
+            r.hora_aluno,
+            r.receita,
+            r.turmas
+        FROM realizado r
+        LEFT JOIN meta mt
+            ON mt.cod_modalidade = TRIM(r.cod_modalidade::text)
+        WHERE
+            r.matriculas > 0
+            OR r.hora_aluno > 0
+            OR r.receita > 0
+            OR r.turmas > 0
+        ORDER BY r.matriculas DESC
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            sql,
+            subregiao,
+            ano,
+            meses_lista if meses_lista else None
+        )
+
+    resultado = []
+
+    for r in rows:
+        matriculas = r["matriculas"] or 0
+        meta = r["meta"] or 0
+
+        percentual = (
+            f"{((matriculas / meta) * 100):.1f}%".replace(".", ",")
+            if meta > 0
+            else "-"
+        )
+
+        resultado.append({
+            "modalidade": r["modalidade"],
+            "matriculas": matriculas,
+            "meta": meta,
+            "percentual": percentual,
+            "horaAluno": r["hora_aluno"] or 0,
+            "receita": float(r["receita"] or 0),
+            "turmas": r["turmas"] or 0
+        })
+
+    return resultado
+
+@router.get("/executivo/subregioes/kpis")
+async def executivo_subregioes_kpis(
+    request: Request,
+    ano: int | None = None,
+    meses: str | None = None,
+    subregiao: str | None = None
+):
+    pool = request.app.state.pool
+
+    meses_lista = [
+        int(m)
+        for m in (meses or "").split(",")
+        if m.strip().isdigit()
+    ]
+
+    mes_final = max(meses_lista) if meses_lista else 12
+
+    meta_periodo = """
+        CASE WHEN 1 = ANY($2::int[]) THEN COALESCE(jan,0) ELSE 0 END +
+        CASE WHEN 2 = ANY($2::int[]) THEN COALESCE(fev,0) ELSE 0 END +
+        CASE WHEN 3 = ANY($2::int[]) THEN COALESCE(mar,0) ELSE 0 END +
+        CASE WHEN 4 = ANY($2::int[]) THEN COALESCE(abr,0) ELSE 0 END +
+        CASE WHEN 5 = ANY($2::int[]) THEN COALESCE(mai,0) ELSE 0 END +
+        CASE WHEN 6 = ANY($2::int[]) THEN COALESCE(jun,0) ELSE 0 END +
+        CASE WHEN 7 = ANY($2::int[]) THEN COALESCE(jul,0) ELSE 0 END +
+        CASE WHEN 8 = ANY($2::int[]) THEN COALESCE(ago,0) ELSE 0 END +
+        CASE WHEN 9 = ANY($2::int[]) THEN COALESCE(set_,0) ELSE 0 END +
+        CASE WHEN 10 = ANY($2::int[]) THEN COALESCE(out_,0) ELSE 0 END +
+        CASE WHEN 11 = ANY($2::int[]) THEN COALESCE(nov,0) ELSE 0 END +
+        CASE WHEN 12 = ANY($2::int[]) THEN COALESCE(dez,0) ELSE 0 END
+    """
+
+    sql = f"""
+        WITH ultimo_lote_planejamento AS (
+            SELECT MAX(lote_id) AS lote_id
+            FROM planejamento_staging
+            WHERE flag_valida IS DISTINCT FROM FALSE
+              AND tipo = 'META'
+        ),
+
+        meta AS (
+            SELECT
+                SUM({meta_periodo}) FILTER (
+                    WHERE UPPER(TRIM(ps.conta)) = 'MATRÍCULAS'
+                ) AS matriculas_meta,
+
+                SUM({meta_periodo}) FILTER (
+                    WHERE UPPER(TRIM(ps.conta)) = 'HORA-ALUNO'
+                ) AS hora_aluno_meta,
+
+                SUM({meta_periodo}) FILTER (
+                    WHERE UPPER(TRIM(ps.conta)) = 'RECEITAS CORRENTES'
+                ) AS receita_meta
+
+            FROM planejamento_staging ps
+            JOIN ultimo_lote_planejamento ul
+                ON ul.lote_id = ps.lote_id
+            WHERE ps.flag_valida IS DISTINCT FROM FALSE
+            AND ps.tipo = 'META'
+            AND (
+                $3::text IS NULL
+                OR UPPER(TRIM(ps.subregiao)) = UPPER(TRIM($3))
+            )
+        ),
+
+        realizado AS (
+            SELECT
+                COALESCE(SUM(rp.matriculas_real), 0) AS matriculas,
+                COALESCE(SUM(rp.ha_real), 0) AS hora_aluno,
+                COALESCE(SUM(rp.receita_real), 0) AS receita,
+                COUNT(DISTINCT rp.cod_oferta) AS turmas,
+
+                0 AS vagas_total,
+
+                COUNT(DISTINCT CASE
+                    WHEN rp.cod_oferta IS NOT NULL THEN s.codigo
+                END) AS subregioes_ativas,
+
+                COUNT(DISTINCT s.codigo) AS subregioes_total
+
+            FROM subregioes s
+            LEFT JOIN uo u
+                ON u.cod_subregiao = s.codigo
+            LEFT JOIN ofertas_programas o
+                ON o.cod_uo = u.codigo
+            LEFT JOIN realizado_programas rp
+                ON rp.cod_oferta = o.codigo
+                AND ($1::int IS NULL OR rp.ano = $1)
+                AND (
+                    $2::int[] IS NULL
+                    OR rp.mes = ANY($2::int[])
+                )
+            WHERE (
+                $3::text IS NULL
+                OR s.nome = $3
+            )
+        ),
+
+        ocupacao AS (
+            WITH ultimo_lote_data AS (
+                SELECT MAX(lote_id) AS lote_id
+                FROM data_staging
+            ),
+
+            turmas_ativas_data AS (
+                SELECT
+                    ds.turma,
+                    MAX(COALESCE(ds.vagas, 0)) AS vagas,
+                    SUM(COALESCE(ds.matriculados, 0)) AS matriculados,
+                    SUM(COALESCE(ds.pre_matriculados, 0)) AS pre_matriculados
+                FROM data_staging ds
+                JOIN ultimo_lote_data ul
+                    ON ul.lote_id = ds.lote_id
+                JOIN uo u
+                    ON TRIM(u.codigo_sge::text) = TRIM(ds.cod_unidade::text)
+                JOIN subregioes s
+                    ON s.codigo = u.cod_subregiao
+                WHERE ds.data_inicio <= (
+                    MAKE_DATE($1::int, $4::int, 1)
+                    + INTERVAL '1 month - 1 day'
+                )::date
+                AND (
+                    ds.data_fim IS NULL
+                    OR ds.data_fim >= (
+                        MAKE_DATE($1::int, $4::int, 1)
+                        + INTERVAL '1 month - 1 day'
+                    )::date
+                )
+                AND (
+                    $3::text IS NULL
+                    OR s.nome = $3
+                )
+                GROUP BY ds.turma
+            )
+
+            SELECT
+                COALESCE(SUM(vagas), 0) AS vagas_total,
+                COALESCE(SUM(matriculados + pre_matriculados), 0) AS matriculas_ocupacao
+            FROM turmas_ativas_data
+        ),
+
+        turmas_status AS (
+            SELECT
+                COUNT(DISTINCT t.codigo) FILTER (
+                    WHERE EXTRACT(MONTH FROM t.data_inicio)::int = ANY($2::int[])
+                ) AS turmas_periodo,
+
+                COUNT(DISTINCT t.codigo) FILTER (
+                    WHERE t.data_inicio <= (
+                        MAKE_DATE($1::int, $4::int, 1)
+                        + INTERVAL '1 month - 1 day'
+                    )::date
+                    AND (
+                        t.data_fim IS NULL
+                        OR t.data_fim >= MAKE_DATE($1::int, $4::int, 1)
+                    )
+                ) AS turmas_ativas
+
+            FROM turmas t
+            JOIN uo u
+                ON u.codigo = t.cod_uo
+            JOIN subregioes s
+                ON s.codigo = u.cod_subregiao
+            WHERE t.ano_referencia = $1
+            AND (
+                $3::text IS NULL
+                OR s.nome = $3
+            )
+        )
+
+        SELECT
+            realizado.*,
+            ocupacao.vagas_total AS vagas_ocupacao,
+            ocupacao.matriculas_ocupacao,
+            COALESCE(meta.matriculas_meta, 0) AS matriculas_meta,
+            COALESCE(meta.hora_aluno_meta, 0) AS hora_aluno_meta,
+            COALESCE(turmas_status.turmas_ativas, 0) AS turmas_ativas,
+            COALESCE(turmas_status.turmas_periodo, 0) AS turmas_periodo,
+            COALESCE(turmas_status.turmas_ativas, 0) AS turmas_acumulado,
+            COALESCE(meta.receita_meta, 0) AS receita_meta
+        FROM realizado, meta, ocupacao, turmas_status
+    """
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            sql,
+            ano,
+            meses_lista if meses_lista else None,
+            subregiao,
+            mes_final
+        )
+
+    matriculas = row["matriculas"] or 0
+    vagas_total = row["vagas_ocupacao"] or 0
+    matriculas_ocupacao = row["matriculas_ocupacao"] or 0
+
+    ocupacao = (
+        (matriculas_ocupacao / vagas_total) * 100
+        if vagas_total > 0
+        else 0
+    )
+
+    return {
+        "matriculas": matriculas,
+        "matriculas_meta": row["matriculas_meta"] or 0,
+
+        "hora_aluno": row["hora_aluno"] or 0,
+        "hora_aluno_meta": row["hora_aluno_meta"] or 0,
+
+        "receita": float(row["receita"] or 0),
+        "receita_meta": float(row["receita_meta"] or 0),
+
+        "turmas": row["turmas_periodo"] or 0,
+        "ocupacao": ocupacao,
+        "turmas_acumulado": row["turmas_ativas"] or 0,
+
+        "subregioes": row["subregioes_ativas"] or 0,
+        "subregioes_total": row["subregioes_total"] or 0,
+
+        "regioes": 0
+    }
+
+@router.get("/executivo/subregioes/periodos")
+async def executivo_subregioes_periodos(request: Request):
+    pool = request.app.state.pool
+
+    sql = """
+        SELECT DISTINCT
+            rp.ano,
+            rp.mes
+        FROM realizado_programas rp
+        WHERE rp.ano IS NOT NULL
+          AND rp.mes IS NOT NULL
+        ORDER BY
+            rp.ano DESC,
+            rp.mes ASC
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql)
+
+    nomes_meses = {
+        1: "Jan",
+        2: "Fev",
+        3: "Mar",
+        4: "Abr",
+        5: "Mai",
+        6: "Jun",
+        7: "Jul",
+        8: "Ago",
+        9: "Set",
+        10: "Out",
+        11: "Nov",
+        12: "Dez"
+    }
+
+    return [
+        {
+            "ano": r["ano"],
+            "mes": r["mes"],
+            "value": f'{r["ano"]}-{int(r["mes"]):02d}',
+            "label": f'{nomes_meses.get(int(r["mes"]), r["mes"])}/{r["ano"]}'
+        }
+        for r in rows
+    ]
+
+@router.get("/executivo/subregioes/lista")
+async def executivo_subregioes_lista(request: Request):
+    pool = request.app.state.pool
+
+    sql = """
+        SELECT
+            codigo,
+            nome
+        FROM subregioes
+        ORDER BY nome ASC
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql)
+
+    return [
+        {
+            "codigo": r["codigo"],
+            "nome": r["nome"]
+        }
+        for r in rows
+    ]
+
+@router.get("/executivo/acoes")
+async def listar_acoes(request: Request):
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                id,
+                ano,
+                mes,
+                programa,
+                regiao,
+                subregiao,
+                uo,
+                tipo,
+                titulo,
+                descricao,
+                responsavel,
+                data_prevista,
+                status,
+                evidencia,
+                criado_por,
+                criado_em,
+                atualizado_em
+            FROM executivo_acoes
+            ORDER BY criado_em DESC, id DESC
+            """
+        )
+
+    return [dict(r) for r in rows]
+
+@router.post("/executivo/acoes")
+async def criar_acao(request: Request, payload: ExecutivoAcaoPayload):
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO executivo_acoes (
+                ano,
+                mes,
+                programa,
+                regiao,
+                subregiao,
+                uo,
+                tipo,
+                titulo,
+                descricao,
+                responsavel,
+                data_prevista,
+                status,
+                evidencia,
+                criado_em,
+                atualizado_em
+            )
+            VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),NOW()
+            )
+            RETURNING
+                id,
+                ano,
+                mes,
+                programa,
+                regiao,
+                subregiao,
+                uo,
+                tipo,
+                titulo,
+                descricao,
+                responsavel,
+                data_prevista,
+                status,
+                evidencia,
+                criado_por,
+                criado_em,
+                atualizado_em
+            """,
+            payload.ano,
+            payload.mes,
+            payload.programa,
+            payload.regiao,
+            payload.subregiao,
+            payload.uo,
+            payload.tipo,
+            payload.titulo,
+            payload.descricao,
+            payload.responsavel,
+            payload.data_prevista,
+            payload.status,
+            payload.evidencia,
+        )
+
+    return dict(row)
+
+@router.put("/executivo/acoes/{acao_id}")
+async def atualizar_acao(
+    request: Request,
+    acao_id: int,
+    payload: ExecutivoAcaoPayload
+):
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE executivo_acoes
+            SET
+                ano = $1,
+                mes = $2,
+                programa = $3,
+                regiao = $4,
+                subregiao = $5,
+                uo = $6,
+                tipo = $7,
+                titulo = $8,
+                descricao = $9,
+                responsavel = $10,
+                data_prevista = $11,
+                status = $12,
+                evidencia = $13,
+                atualizado_em = NOW()
+            WHERE id = $14
+            RETURNING *
+            """,
+            payload.ano,
+            payload.mes,
+            payload.programa,
+            payload.regiao,
+            payload.subregiao,
+            payload.uo,
+            payload.tipo,
+            payload.titulo,
+            payload.descricao,
+            payload.responsavel,
+            payload.data_prevista,
+            payload.status,
+            payload.evidencia,
+            acao_id,
+        )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Ação não encontrada.")
+
+    return dict(row)
+
+@router.delete("/executivo/acoes/{acao_id}")
+async def excluir_acao(request: Request, acao_id: int):
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            DELETE FROM executivo_acoes
+            WHERE id = $1
+            RETURNING id
+            """,
+            acao_id
+        )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Ação não encontrada.")
+
+    return {
+        "ok": True,
+        "id": row["id"]
+    }
+
+@router.get("/executivo/regioes/lista")
+async def listar_regioes_acoes(request: Request):
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                nome
+            FROM regioes
+            WHERE nome IS NOT NULL
+              AND TRIM(nome) <> ''
+            ORDER BY nome
+            """
+        )
+
+    return [dict(r) for r in rows]
+
+@router.get("/executivo/programas/lista")
+async def listar_programas_acoes(request: Request):
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                nome_programa AS nome
+            FROM programas
+            WHERE nome_programa IS NOT NULL
+              AND TRIM(nome_programa) <> ''
+            ORDER BY nome_programa
+            """
+        )
+
+    return [dict(r) for r in rows]
+
+@router.get("/executivo/uos/lista")
+async def listar_uos_acoes(request: Request):
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                nome
+            FROM uo
+            WHERE nome IS NOT NULL
+              AND TRIM(nome) <> ''
+            ORDER BY nome
+            """
+        )
+
+    return [dict(r) for r in rows]
+
+@router.post("/executivo/relatorios/gerar")
+async def gerar_relatorio(
+    request: Request,
+    payload: RelatorioGerarPayload
+):
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+
+        if payload.tipo == "executivo":
+            preview = await montar_preview_relatorio_executivo(
+                conn,
+                payload.filtros,
+                payload.opcoes
+            )
+
+            return {
+                "ok": True,
+                "tipo": payload.tipo,
+                "formato": payload.formato,
+                "orientacao": payload.orientacao,
+                "preview": preview
+            }
+
+    raise HTTPException(
+        status_code=400,
+        detail="Tipo de relatório ainda não implementado."
+    )
+
+@router.post("/executivo/relatorios/pdf")
+async def gerar_relatorio_pdf(
+    request: Request,
+    payload: RelatorioGerarPayload
+):
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+
+        if payload.tipo == "executivo":
+            preview = await montar_preview_relatorio_executivo(
+                conn,
+                payload.filtros,
+                payload.opcoes
+            )
+
+            pdf = gerar_pdf_relatorio_executivo(
+                preview,
+                payload.orientacao
+            )
+
+            ano = payload.filtros.ano or "ano"
+
+            meses = payload.filtros.meses or []
+
+            nomes_meses = {
+                1: "Jan",
+                2: "Fev",
+                3: "Mar",
+                4: "Abr",
+                5: "Mai",
+                6: "Jun",
+                7: "Jul",
+                8: "Ago",
+                9: "Set",
+                10: "Out",
+                11: "Nov",
+                12: "Dez",
+            }
+
+            if not meses:
+                periodo = "Anual"
+            elif len(meses) == 1:
+                periodo = nomes_meses.get(meses[0], str(meses[0]))
+            else:
+                meses_ordenados = sorted(meses)
+                periodo = (
+                    f"{nomes_meses.get(meses_ordenados[0], meses_ordenados[0])}-"
+                    f"{nomes_meses.get(meses_ordenados[-1], meses_ordenados[-1])}"
+                )
+
+            nome_arquivo = f"RelatorioExecutivo_{ano}_{periodo}.pdf"
+
+            return StreamingResponse(
+                pdf,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition":
+                    f'inline; filename="{nome_arquivo}"'
+                }
+            )
+
+    raise HTTPException(
+        status_code=400,
+        detail="Tipo de relatório ainda não implementado para PDF."
+    )
+
+@router.post("/executivo/relatorios/opcoes-filtros")
+async def opcoes_filtros_relatorio(
+    request: Request,
+    payload: dict
+):
+    pool = request.app.state.pool
+    ano = payload.get("ano")
+    meses = payload.get("meses") or list(range(1, 13))
+    programa = payload.get("programa")
+    regiao = payload.get("regiao")
+    subregiao = payload.get("subregiao")
+    uo = payload.get("uo")
+
+    async with pool.acquire() as conn:
+        params = [ano, meses]
+
+        filtros = [
+            "o.ano = $1",
+            "rp.mes = ANY($2::int[])"
+        ]
+
+        if programa:
+            params.append(programa)
+            filtros.append(f"""
+                UPPER(TRIM(p.nome_programa)) = UPPER(TRIM(${len(params)}))
+            """)
+
+        if regiao:
+            params.append(regiao)
+            filtros.append(f"""
+                UPPER(TRIM(r.nome)) = UPPER(TRIM(${len(params)}))
+            """)
+
+        if subregiao:
+            params.append(subregiao)
+            filtros.append(f"""
+                UPPER(TRIM(s.nome)) = UPPER(TRIM(${len(params)}))
+            """)
+
+        if uo:
+            params.append(uo)
+            filtros.append(f"""
+                UPPER(TRIM(u.nome)) = UPPER(TRIM(${len(params)}))
+            """)
+
+        where_sql = " AND ".join(filtros)
+
+        sql = f"""
+            SELECT DISTINCT
+                p.nome_programa AS programa,
+                r.nome AS regiao,
+                s.nome AS subregiao,
+                u.nome AS uo
+            FROM realizado_programas rp
+            JOIN ofertas_programas o
+                ON o.codigo = rp.cod_oferta
+            JOIN programas p
+                ON p.codigo = o.cod_programa
+            JOIN uo u
+                ON u.codigo = o.cod_uo
+            LEFT JOIN subregioes s
+                ON s.codigo = u.cod_subregiao
+            LEFT JOIN regioes r
+                ON r.codigo = s.codigo_regiao
+            WHERE {where_sql}
+        """
+
+        rows = await conn.fetch(sql, *params)
+
+        return {
+            "programas": sorted({row["programa"] for row in rows if row["programa"]}),
+            "regioes": sorted({row["regiao"] for row in rows if row["regiao"]}),
+            "subregioes": sorted({row["subregiao"] for row in rows if row["subregiao"]}),
+            "uos": sorted({row["uo"] for row in rows if row["uo"]}),
+        }
+
+@router.get("/executivo/turmas")
+async def listar_turmas_executivo(
+    request: Request,
+    ano: int | None = None,
+    meses: str | None = None,
+    regiao: str | None = None,
+    subregiao: str | None = None,
+    uo: str | None = None,
+    status: str | None = None,
+):
+    pool = request.app.state.pool
+
+    meses_lista = []
+    if meses:
+        meses_lista = [
+            int(m)
+            for m in meses.split(",")
+            if m.strip().isdigit()
+        ]
+
+    async with pool.acquire() as conn:
+
+        where = []
+        params = []
+        idx = 1
+
+        if ano:
+            where.append(f"t.ano_referencia = ${idx}")
+            params.append(ano)
+            idx += 1
+
+        if meses_lista:
+            where.append(f"EXTRACT(MONTH FROM t.data_inicio)::int = ANY(${idx}::int[])")
+            params.append(meses_lista)
+            idx += 1
+
+        if regiao:
+            where.append(f"r.nome = ${idx}")
+            params.append(regiao)
+            idx += 1
+
+        if subregiao:
+            where.append(f"s.nome = ${idx}")
+            params.append(subregiao)
+            idx += 1
+
+        if uo:
+            where.append(f"u.nome = ${idx}")
+            params.append(uo)
+            idx += 1
+
+        where_sql = ""
+        if where:
+            where_sql = "WHERE " + " AND ".join(where)
+
+        sql = f"""
+            SELECT
+                t.codigo_sge AS codigo,
+                UPPER(COALESCE(c.nome_curso, '-')) AS curso,
+                COALESCE(m.nome, '-') AS modalidade,
+                COALESCE(r.nome, '-') AS regiao,
+                COALESCE(s.nome, '-') AS subregiao,
+                COALESCE(u.nome, '-') AS uo,
+                t.data_inicio AS inicio,
+                CASE
+                    WHEN COALESCE(t.data_fim, t.data_fim_contratoapr) = DATE '1900-01-01'
+                        THEN NULL
+                    ELSE COALESCE(t.data_fim, t.data_fim_contratoapr)
+                END AS termino,
+
+                COALESCE(tsr.matriculados, 0) AS alunos,
+                COALESCE(t.vagas_total, 0) AS vagas_total,
+
+                CASE
+                    WHEN t.data_inicio > CURRENT_DATE THEN 'Prevista'
+
+                    WHEN COALESCE(t.data_fim, t.data_fim_contratoapr) IS NULL
+                    OR COALESCE(t.data_fim, t.data_fim_contratoapr) = DATE '1900-01-01'
+                        THEN 'Ativa'
+
+                    WHEN COALESCE(t.data_fim, t.data_fim_contratoapr) < CURRENT_DATE THEN 'Concluída'
+
+                    ELSE 'Ativa'
+                END AS status,
+
+                CASE
+                    WHEN t.data_inicio > CURRENT_DATE THEN 'prevista'
+
+                    WHEN COALESCE(t.data_fim, t.data_fim_contratoapr) IS NULL
+                    OR COALESCE(t.data_fim, t.data_fim_contratoapr) = DATE '1900-01-01'
+                        THEN 'ativa'
+
+                    WHEN COALESCE(t.data_fim, t.data_fim_contratoapr) < CURRENT_DATE THEN 'concluida'
+
+                    ELSE 'ativa'
+                END AS status_normalizado
+
+            FROM turmas t
+
+            LEFT JOIN sge_turma_detalhe_alunos a
+                ON a.cod_turma = t.codigo_sge
+
+            LEFT JOIN curso c
+                ON c.codigo = t.cod_curso
+
+            LEFT JOIN modalidade m
+                ON m.codigo = t.cod_modalidade
+
+            LEFT JOIN uo u
+                ON u.codigo = t.cod_uo
+            
+            LEFT JOIN subregioes s
+                ON s.codigo = u.cod_subregiao
+            
+            LEFT JOIN regioes r
+                ON r.codigo = s.codigo_regiao
+            
+            LEFT JOIN turmas_status_resumo tsr
+                ON tsr.cod_turma = t.codigo
+
+            {where_sql}
+
+            GROUP BY
+                t.codigo_sge,
+                c.nome_curso,
+                m.nome,
+                u.nome,
+                r.nome,
+                s.nome,
+                t.data_inicio,
+                tsr.matriculados,
+                COALESCE(t.data_fim, t.data_fim_contratoapr),
+                t.vagas_total
+
+            ORDER BY
+                t.data_inicio DESC,
+                t.codigo_sge
+        """
+
+        linhas = await conn.fetch(sql, *params)
+
+        turmas = [
+            dict(linha)
+            for linha in linhas
+        ]
+
+        kpis_sql = """
+            SELECT
+                COALESCE(SUM(rp.matriculas_real), 0) AS alunos_periodo,
+                COALESCE(SUM(tur.vagas_periodo), 0) AS vagas_periodo
+            FROM realizado_programas rp
+
+            JOIN ofertas_programas o
+                ON o.codigo = rp.cod_oferta
+
+            LEFT JOIN uo u
+                ON u.codigo = o.cod_uo
+
+            LEFT JOIN subregioes s
+                ON s.codigo = u.cod_subregiao
+
+            LEFT JOIN regioes r
+                ON r.codigo = s.codigo_regiao
+
+            LEFT JOIN (
+                SELECT
+                    t.ano_referencia AS ano,
+                    t.cod_uo,
+                    t.cod_modalidade,
+                    t.cod_programa,
+                    EXTRACT(MONTH FROM t.data_inicio)::int AS mes,
+                    SUM(COALESCE(t.vagas_total, 0)) AS vagas_periodo
+                FROM turmas t
+                GROUP BY
+                    t.ano_referencia,
+                    t.cod_uo,
+                    t.cod_modalidade,
+                    t.cod_programa,
+                    EXTRACT(MONTH FROM t.data_inicio)::int
+            ) tur
+                ON tur.ano = rp.ano
+            AND tur.cod_uo = o.cod_uo
+            AND tur.cod_modalidade = o.cod_modalidade
+            AND tur.cod_programa = o.cod_programa
+            AND tur.mes = rp.mes
+
+            WHERE 1=1
+        """
+
+        kpis_params = []
+        kidx = 1
+
+        if ano:
+            kpis_sql += f" AND rp.ano = ${kidx}"
+            kpis_params.append(ano)
+            kidx += 1
+
+        if meses_lista:
+            kpis_sql += f" AND rp.mes = ANY(${kidx}::int[])"
+            kpis_params.append(meses_lista)
+            kidx += 1
+
+        if regiao:
+            kpis_sql += f" AND r.nome = ${kidx}"
+            kpis_params.append(regiao)
+            kidx += 1
+
+        if subregiao:
+            kpis_sql += f" AND s.nome = ${kidx}"
+            kpis_params.append(subregiao)
+            kidx += 1
+
+        if uo:
+            kpis_sql += f" AND u.nome = ${kidx}"
+            kpis_params.append(uo)
+            kidx += 1
+
+        kpis = await conn.fetchrow(kpis_sql, *kpis_params)      
+
+        if status:
+            turmas = [
+                t for t in turmas
+                if t["status_normalizado"] == status
+            ]
+
+        return {
+            "turmas": turmas,
+            "kpis": dict(kpis)
+        }
+    
+@router.get("/executivo/turmas/opcoes-filtros")
+async def opcoes_filtros_turmas(
+    request: Request,
+    ano: int | None = None,
+    meses: str | None = None,
+    regiao: str | None = None,
+    subregiao: str | None = None,
+    uo: str | None = None,
+):
+    pool = request.app.state.pool
+
+    meses_lista = []
+    if meses:
+        meses_lista = [
+            int(m)
+            for m in meses.split(",")
+            if m.strip().isdigit()
+        ]
+
+    async with pool.acquire() as conn:
+
+        where = []
+        params = []
+        idx = 1
+
+        if ano:
+            where.append(f"t.ano_referencia = ${idx}")
+            params.append(ano)
+            idx += 1
+
+        if meses_lista:
+            where.append(f"EXTRACT(MONTH FROM t.data_inicio)::int = ANY(${idx}::int[])")
+            params.append(meses_lista)
+            idx += 1
+
+        if regiao:
+            where.append(f"r.nome = ${idx}")
+            params.append(regiao)
+            idx += 1
+
+        if subregiao:
+            where.append(f"s.nome = ${idx}")
+            params.append(subregiao)
+            idx += 1
+
+        if uo:
+            where.append(f"u.nome = ${idx}")
+            params.append(uo)
+            idx += 1
+
+        where_sql = ""
+        if where:
+            where_sql = "WHERE " + " AND ".join(where)
+
+        sql = f"""
+            SELECT
+                ARRAY_AGG(DISTINCT r.nome ORDER BY r.nome)
+                    FILTER (WHERE r.nome IS NOT NULL) AS regioes,
+
+                ARRAY_AGG(DISTINCT s.nome ORDER BY s.nome)
+                    FILTER (WHERE s.nome IS NOT NULL) AS subregioes,
+
+                ARRAY_AGG(DISTINCT u.nome ORDER BY u.nome)
+                    FILTER (WHERE u.nome IS NOT NULL) AS uos
+
+            FROM turmas t
+
+            LEFT JOIN uo u
+                ON u.codigo = t.cod_uo
+
+            LEFT JOIN subregioes s
+                ON s.codigo = u.cod_subregiao
+
+            LEFT JOIN regioes r
+                ON r.codigo = s.codigo_regiao
+
+            {where_sql}
+        """
+
+        row = await conn.fetchrow(sql, *params)
+
+        return {
+            "regioes": row["regioes"] or [],
+            "subregioes": row["subregioes"] or [],
+            "uos": row["uos"] or [],
+        }
