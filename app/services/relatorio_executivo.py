@@ -265,6 +265,8 @@ async def montar_preview_relatorio_executivo(conn, filtros, opcoes):
 
             COALESCE(
                 SUM({meta_periodo}) FILTER (
+                
+                
                     WHERE UPPER(TRIM(ps.conta)) = 'MATRÍCULAS'
                 ),
                 0
