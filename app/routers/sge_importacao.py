@@ -16,7 +16,8 @@ from pydantic import BaseModel
 from pathlib import Path
 from pydantic import BaseModel
 from app.services.relatorio_executivo import montar_preview_relatorio_executivo
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from app.services.pptx_carteira_programas import gerar_pptx_carteira_programas
 
 from app.services.pdf_relatorio_executivo import (
     gerar_pdf_relatorio_executivo
@@ -1731,7 +1732,6 @@ async def processar_matriculas_realizadas(request: Request, lote_id: int):
                 AND s.status = 'RESOLVIDO'
                 AND s.cod_oferta_resolvido = rp.cod_oferta
                 AND s.ano = rp.ano
-                AND s.mes = rp.mes
             )
             """,
             lote_id
@@ -6260,6 +6260,9 @@ async def programas_summary(
                 AND ps.flag_valida = TRUE
                 AND ps.tipo = 'META'
                 {filtro_meta_sub}
+                {filtro_meta_regiao}
+                {filtro_meta_uo}
+                {filtro_meta_programa}
                 AND (
                     COALESCE(ps.jan,0) + COALESCE(ps.fev,0) + COALESCE(ps.mar,0) +
                     COALESCE(ps.abr,0) + COALESCE(ps.mai,0) + COALESCE(ps.jun,0) +
@@ -6536,7 +6539,8 @@ async def programas_tabela(
     request: Request,
     ano: int = 2026,
     subregioes: str | None = None,
-    programas: str | None = None
+    programas: str | None = None,
+    regiao: str | None = None
 ):
     pool = request.app.state.pool
 
@@ -6548,6 +6552,19 @@ async def programas_tabela(
         if ids_sub:
             filtros.append(f"COALESCE(s.codigo, s_txt.codigo) = ANY(${len(params)+1}::int[])")
             params.append(ids_sub)
+    
+    if regiao:
+        filtros.append(
+            f"""
+            COALESCE(s.codigo_regiao, s_txt.codigo_regiao) = (
+                SELECT r.codigo
+                FROM regioes r
+                WHERE UPPER(TRIM(r.nome)) = UPPER(TRIM(${len(params)+1}))
+                LIMIT 1
+            )
+            """
+        )
+        params.append(regiao)
 
     if programas:
         ids_prog = [int(x) for x in programas.split(",") if x.strip().isdigit()]
@@ -7928,6 +7945,7 @@ async def performance_cards(
     meses: str | None = None,
     subregioes: str | None = None,
     programas: str | None = None,
+    crs: str | None = None,
 ):
     pool = request.app.state.pool
 
@@ -7936,6 +7954,11 @@ async def performance_cards(
 
     ids_sub = [int(x) for x in (subregioes or "").split(",") if x.strip().isdigit()]
     ids_prog_txt = [str(int(x)) for x in (programas or "").split(",") if x.strip().isdigit()]
+    ids_cr = [
+        x.strip()
+        for x in (crs or "").split(",")
+        if x.strip()
+    ]
     ids_meses = [int(x) for x in (meses or "").split(",") if x.strip().isdigit()]
 
     if not ids_meses:
@@ -7952,6 +7975,8 @@ async def performance_cards(
     filtro_real_mat_prog = ""
     filtro_sem_contrato_sub = ""
     filtro_sem_contrato_prog = ""
+    filtro_stage_cr = ""
+    filtro_real_cr = ""
 
     if ids_sub:
         filtro_stage_sub = f" AND bs.subregiao_codigo = ANY(${idx}::int[])"
@@ -7967,6 +7992,18 @@ async def performance_cards(
         filtro_real_mat_prog = f" AND CAST(o.cod_programa AS text) = ANY(${idx}::text[])"
         filtro_sem_contrato_prog = f" AND CAST(t.cod_programa AS text) = ANY(${idx}::text[])"
         params.append(ids_prog_txt)
+        idx += 1
+
+    if ids_cr:
+        filtro_stage_cr = f"""
+            AND TRIM(COALESCE(ps.cr_raw::text,'')) = ANY(${idx}::text[])
+        """
+
+        filtro_real_cr = f"""
+            AND TRIM(COALESCE(o.cr::text,'')) = ANY(${idx}::text[])
+        """
+
+        params.append(ids_cr)
         idx += 1
 
     conta_filtro = {
@@ -7995,6 +8032,7 @@ async def performance_cards(
             AND rp.mes = ANY($2::int[])
             {filtro_real_mat_sub}
             {filtro_real_mat_prog}
+            {filtro_real_cr}
             GROUP BY CAST(o.cod_programa AS text)
         )
         """
@@ -8131,6 +8169,7 @@ async def performance_cards(
         ON sn.nome_chave = UPPER(TRIM(COALESCE(ps.subregiao::text, '')))
         WHERE ps.flag_valida = TRUE
         AND UPPER(TRIM(COALESCE(ps.conta::text, ''))) IN {tuple(conta_filtro)}
+        {filtro_stage_cr}
     ),
 
     planejamento_base AS (
@@ -8169,6 +8208,7 @@ async def performance_cards(
         LEFT JOIN subregioes_norm sn
         ON sn.nome_chave = UPPER(TRIM(COALESCE(ps.subregiao::text, '')))
         WHERE CAST(o.ano AS integer) = $1
+        {filtro_real_cr}
     ),
 
     {realizado_cte}
@@ -8219,6 +8259,317 @@ async def performance_cards(
 
     return resultado
 
+@router.get("/performance/filtros/subregioes")
+async def performance_filtros_subregioes(
+    request: Request,
+    indicador: str = "matriculas",
+    ano: int = 2026,
+    meses: str | None = None,
+    regiao: str | None = None,
+    programas: str | None = None,
+    crs: str | None = None,
+):
+    pool = request.app.state.pool
+
+    ids_meses = [int(x) for x in (meses or "").split(",") if x.strip().isdigit()]
+    ids_prog = [str(int(x)) for x in (programas or "").split(",") if x.strip().isdigit()]
+    ids_cr = [
+        x.strip()
+        for x in (crs or "").split(",")
+        if x.strip()
+    ]
+
+    if not ids_meses:
+        ids_meses = list(range(1, 13))
+
+    params = [ano, ids_meses]
+    idx = 3
+
+    filtro_regiao = ""
+    filtro_prog = ""
+    filtro_cr = ""
+
+    if regiao:
+        filtro_regiao = f"AND UPPER(TRIM(r.nome)) = UPPER(TRIM(${idx}::text))"
+        params.append(regiao)
+        idx += 1
+
+    if ids_prog:
+        filtro_prog = f"AND pn.programa_id_txt = ANY(${idx}::text[])"
+        params.append(ids_prog)
+        idx += 1
+    
+    if ids_cr:
+        filtro_cr = f"AND TRIM(COALESCE(o.cr::text, '')) = ANY(${len(params)+1}::text[])"
+        params.append(ids_cr)
+
+    real_col = {
+        "matriculas": "COALESCE(rp.matriculas_real, 0)",
+        "hora_aluno": "COALESCE(rp.ha_real, 0)",
+        "receita": "COALESCE(rp.receita_real, 0)",
+    }.get(indicador, "COALESCE(rp.matriculas_real, 0)")
+
+    sql = f"""
+    WITH programas_norm AS (
+        SELECT
+            TRIM(COALESCE(codigo::text, '')) AS codigo_txt,
+            CASE
+                WHEN TRIM(COALESCE(codigo::text, '')) = '29' THEN '11'
+                WHEN TRIM(COALESCE(codigo::text, '')) = '30' THEN '7'
+                ELSE TRIM(COALESCE(codigo::text, ''))
+            END AS programa_id_txt
+        FROM programas
+    ),
+
+    br AS (
+        SELECT DISTINCT
+            pn.programa_id_txt,
+            CAST(u.cod_subregiao AS integer) AS subregiao_codigo
+        FROM ofertas_programas o
+        JOIN programas_norm pn
+          ON pn.codigo_txt = TRIM(COALESCE(o.cod_programa::text, ''))
+        JOIN uo u
+          ON u.codigo = o.cod_uo
+        WHERE CAST(o.ano AS integer) = $1
+        {filtro_prog}
+        {filtro_cr}
+
+    ),
+
+    realizado AS (
+        SELECT
+            br.subregiao_codigo,
+            COALESCE(SUM({real_col}), 0) AS realizado
+        FROM br
+        JOIN realizado_programas rp
+        ON rp.ano = $1
+        AND rp.mes = ANY($2::int[])
+        JOIN ofertas_programas o
+        ON o.codigo = rp.cod_oferta
+        AND CAST(o.cod_programa AS text) = br.programa_id_txt
+        JOIN uo u
+        ON u.codigo = o.cod_uo
+        AND CAST(u.cod_subregiao AS integer) = br.subregiao_codigo
+        GROUP BY br.subregiao_codigo
+    )
+
+    SELECT DISTINCT
+        s.codigo AS codigo,
+        UPPER(TRIM(s.nome)) AS nome
+    FROM subregioes s
+    JOIN regioes r
+      ON r.codigo = s.codigo_regiao
+    JOIN realizado re
+      ON re.subregiao_codigo = s.codigo
+    WHERE COALESCE(re.realizado, 0) > 0
+    {filtro_regiao}
+    ORDER BY nome
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+
+    return [dict(r) for r in rows]
+
+@router.get("/performance/filtros/regioes")
+async def performance_filtros_regioes(
+    request: Request,
+    indicador: str = "matriculas",
+    ano: int = 2026,
+    meses: str | None = None,
+    programas: str | None = None,
+    subregioes: str | None = None,
+    crs: str | None = None,
+):
+    pool = request.app.state.pool
+
+    ids_meses = [int(x) for x in (meses or "").split(",") if x.strip().isdigit()]
+    ids_prog = [str(int(x)) for x in (programas or "").split(",") if x.strip().isdigit()]
+    ids_sub = [int(x) for x in (subregioes or "").split(",") if x.strip().isdigit()]
+    ids_cr = [
+        x.strip()
+        for x in (crs or "").split(",")
+        if x.strip()
+    ]
+
+    if not ids_meses:
+        ids_meses = list(range(1, 13))
+
+    params = [ano, ids_meses]
+    idx = 3
+
+    filtro_prog = ""
+    filtro_sub = ""
+    filtro_cr = ""
+
+    if ids_prog:
+        filtro_prog = f"AND pn.programa_id_txt = ANY(${idx}::text[])"
+        params.append(ids_prog)
+        idx += 1
+
+    if ids_sub:
+        filtro_sub = f"AND CAST(u.cod_subregiao AS integer) = ANY(${idx}::int[])"
+        params.append(ids_sub)
+        idx += 1
+    
+    if ids_cr:
+        filtro_cr = f"AND TRIM(COALESCE(o.cr::text, '')) = ANY(${len(params)+1}::text[])"
+        params.append(ids_cr)
+
+    real_col = {
+        "matriculas": "COALESCE(rp.matriculas_real, 0)",
+        "hora_aluno": "COALESCE(rp.ha_real, 0)",
+        "receita": "COALESCE(rp.receita_real, 0)",
+    }.get(indicador, "COALESCE(rp.matriculas_real, 0)")
+
+    sql = f"""
+    WITH programas_norm AS (
+        SELECT
+            TRIM(COALESCE(codigo::text, '')) AS codigo_txt,
+            CASE
+                WHEN TRIM(COALESCE(codigo::text, '')) = '29' THEN '11'
+                WHEN TRIM(COALESCE(codigo::text, '')) = '30' THEN '7'
+                ELSE TRIM(COALESCE(codigo::text, ''))
+            END AS programa_id_txt
+        FROM programas
+    ),
+
+    realizado AS (
+        SELECT
+            r.nome AS regiao,
+            COALESCE(SUM({real_col}), 0) AS realizado
+        FROM realizado_programas rp
+        JOIN ofertas_programas o
+          ON o.codigo = rp.cod_oferta
+        JOIN programas_norm pn
+          ON pn.codigo_txt = TRIM(COALESCE(o.cod_programa::text, ''))
+        JOIN uo u
+          ON u.codigo = o.cod_uo
+        JOIN subregioes s
+          ON s.codigo = CAST(u.cod_subregiao AS integer)
+        JOIN regioes r
+          ON r.codigo = s.codigo_regiao
+        WHERE rp.ano = $1
+        AND rp.mes = ANY($2::int[])
+        {filtro_prog}
+        {filtro_sub}
+        {filtro_cr}
+        GROUP BY r.nome
+    )
+
+    SELECT DISTINCT
+        UPPER(TRIM(regiao)) AS regiao
+    FROM realizado
+    WHERE COALESCE(realizado, 0) > 0
+    ORDER BY regiao
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+
+    return [dict(r) for r in rows]
+
+@router.get("/performance/filtros/programas")
+async def performance_filtros_programas(
+    request: Request,
+    indicador: str = "matriculas",
+    ano: int = 2026,
+    meses: str | None = None,
+    regiao: str | None = None,
+    subregioes: str | None = None,
+    crs: str | None = None,
+):
+    pool = request.app.state.pool
+
+    ids_meses = [int(x) for x in (meses or "").split(",") if x.strip().isdigit()]
+    ids_sub = [int(x) for x in (subregioes or "").split(",") if x.strip().isdigit()]
+    ids_cr = [x.strip() for x in (crs or "").split(",") if x.strip()]
+
+    if not ids_meses:
+        ids_meses = list(range(1, 13))
+
+    params = [ano, ids_meses]
+    idx = 3
+
+    filtro_regiao = ""
+    filtro_sub = ""
+    filtro_cr = ""
+
+    if regiao:
+        filtro_regiao = f"AND UPPER(TRIM(r.nome)) = UPPER(TRIM(${idx}::text))"
+        params.append(regiao)
+        idx += 1
+
+    if ids_sub:
+        filtro_sub = f"AND CAST(u.cod_subregiao AS integer) = ANY(${idx}::int[])"
+        params.append(ids_sub)
+        idx += 1
+    
+    if ids_cr:
+        filtro_cr = f"AND TRIM(COALESCE(o.cr::text, '')) = ANY(${idx}::text[])"
+        params.append(ids_cr)
+        idx += 1
+
+    real_col = {
+        "matriculas": "COALESCE(rp.matriculas_real, 0)",
+        "hora_aluno": "COALESCE(rp.ha_real, 0)",
+        "receita": "COALESCE(rp.receita_real, 0)",
+    }.get(indicador, "COALESCE(rp.matriculas_real, 0)")
+
+    sql = f"""
+    WITH programas_norm AS (
+        SELECT
+            TRIM(COALESCE(codigo::text, '')) AS codigo_txt,
+            CASE
+                WHEN TRIM(COALESCE(codigo::text, '')) = '29' THEN '11'
+                WHEN TRIM(COALESCE(codigo::text, '')) = '30' THEN '7'
+                ELSE TRIM(COALESCE(codigo::text, ''))
+            END AS programa_id_txt,
+            CASE
+                WHEN TRIM(COALESCE(codigo::text, '')) IN ('11', '29') THEN 'CARREIRAS EMPREGABILIDADE'
+                WHEN TRIM(COALESCE(codigo::text, '')) IN ('7', '30') THEN 'QUALIFIC.AI'
+                ELSE nome_programa
+            END AS programa_nome
+        FROM programas
+    ),
+
+    realizado AS (
+        SELECT
+            pn.programa_id_txt,
+            pn.programa_nome,
+            COALESCE(SUM({real_col}), 0) AS realizado
+        FROM realizado_programas rp
+        JOIN ofertas_programas o
+          ON o.codigo = rp.cod_oferta
+        JOIN programas_norm pn
+          ON pn.codigo_txt = TRIM(COALESCE(o.cod_programa::text, ''))
+        JOIN uo u
+          ON u.codigo = o.cod_uo
+        JOIN subregioes s
+          ON s.codigo = CAST(u.cod_subregiao AS integer)
+        JOIN regioes r
+          ON r.codigo = s.codigo_regiao
+        WHERE rp.ano = $1
+        AND rp.mes = ANY($2::int[])
+        {filtro_regiao}
+        {filtro_sub}
+        {filtro_cr}
+        GROUP BY pn.programa_id_txt, pn.programa_nome
+    )
+
+    SELECT
+        CAST(programa_id_txt AS integer) AS codigo,
+        programa_nome AS nome
+    FROM realizado
+    WHERE COALESCE(realizado, 0) > 0
+    ORDER BY programa_nome
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+
+    return [dict(r) for r in rows]
+
 @router.get("/performance/preditiva")
 async def performance_preditiva(
     request: Request,
@@ -8226,6 +8577,7 @@ async def performance_preditiva(
     meses: str | None = None,
     subregioes: str | None = None,
     programas: str | None = None,
+    regiao: str | None = None,
 ):
     pool = request.app.state.pool
 
@@ -8248,6 +8600,8 @@ async def performance_preditiva(
         filtro_meta = ""
         filtro_proj = ""
         filtro_real = ""
+        filtro_regiao_oferta = ""
+        filtro_regiao_meta = ""
 
         if ids_sub:
             filtro_oferta += f" AND u.cod_subregiao = ANY(${idx}::int[])"
@@ -8255,6 +8609,20 @@ async def performance_preditiva(
             filtro_proj += f" AND u.cod_subregiao = ANY(${idx}::int[])"
             filtro_real += f" AND u.cod_subregiao = ANY(${idx}::int[])"
             params.append(ids_sub)
+            idx += 1
+        
+        if regiao:
+            filtro_regiao_oferta = f"""
+                AND EXISTS (
+                    SELECT 1
+                    FROM subregioes sr
+                    JOIN regioes rg ON rg.codigo = sr.codigo_regiao
+                    WHERE sr.codigo = u.cod_subregiao
+                    AND UPPER(TRIM(rg.nome)) = UPPER(TRIM(${idx}))
+                )
+            """
+
+            params.append(regiao)
             idx += 1
 
         if ids_prog_txt:
@@ -8330,9 +8698,12 @@ async def performance_preditiva(
         ),
         subregioes_norm AS (
             SELECT
-                CAST(codigo AS integer) AS codigo_int,
-                UPPER(TRIM(COALESCE(nome::text, ''))) AS nome_chave
-            FROM subregioes
+                CAST(s.codigo AS integer) AS codigo_int,
+                UPPER(TRIM(COALESCE(s.nome::text, ''))) AS nome_chave,
+                UPPER(TRIM(COALESCE(r.nome::text, ''))) AS nome_regiao
+            FROM subregioes s
+            LEFT JOIN regioes r
+            ON r.codigo = s.codigo_regiao
         ),
         programas_norm AS (
             SELECT
@@ -8356,6 +8727,7 @@ async def performance_preditiva(
               ON pn.codigo_txt = TRIM(COALESCE(o.cod_programa::text, ''))
             WHERE o.ano = $1
             {filtro_oferta}
+            {filtro_regiao_oferta}
             {filtro_prog_oferta}
         ),
         meta AS (
@@ -8763,7 +9135,10 @@ async def modalidades_list(
     ano: int = 2026,
     mes: int = 1,
     meses: str | None = None,
+    programa: str | None = None,
     financiamentos: str | None = None,
+    regiao: str | None = None,
+    subregioes: str | None = None,
 ):
     pool = request.app.state.pool
 
@@ -8773,7 +9148,7 @@ async def modalidades_list(
     ]
 
     if not meses_ids:
-        meses_ids = [1]
+        meses_ids = list(range(1, 13))
 
     ids_fin = [
         int(x) for x in (financiamentos or "").split(",")
@@ -8788,11 +9163,49 @@ async def modalidades_list(
 
     params = [ano, meses_ids]
 
+    if programa:
+        ids_programa = [
+            int(x) for x in programa.split(",")
+            if x.strip().isdigit()
+        ]
+
+        if ids_programa:
+            filtros.append(
+                f"o.cod_programa = ANY(${len(params)+1}::int[])"
+            )
+            params.append(ids_programa)
+
     if ids_fin:
         filtros.append(
             f"o.cod_financiamento = ANY(${len(params)+1}::int[])"
         )
         params.append(ids_fin)
+
+    if regiao:
+        regioes_ids = [
+            x.strip().upper()
+            for x in regiao.split(",")
+            if x.strip()
+        ]
+
+        if regioes_ids:
+            filtros.append(
+                f"UPPER(TRIM(r.nome)) = ANY(${len(params)+1}::text[])"
+            )
+            params.append(regioes_ids)
+
+    if subregioes:
+        ids_sub = [
+            x.strip().upper()
+            for x in subregioes.split(",")
+            if x.strip()
+        ]
+
+        if ids_sub:
+            filtros.append(
+                f"UPPER(TRIM(s.nome)) = ANY(${len(params)+1}::text[])"
+            )
+            params.append(ids_sub)
 
     where = " AND ".join(filtros)
 
@@ -8802,16 +9215,22 @@ async def modalidades_list(
             m.nome AS modalidade
         FROM ofertas_programas o
         JOIN modalidade m
-          ON m.codigo = o.cod_modalidade
+        ON m.codigo = o.cod_modalidade
+        LEFT JOIN uo u
+        ON u.codigo = o.cod_uo
+        LEFT JOIN subregioes s
+        ON s.codigo = u.cod_subregiao
+        LEFT JOIN regioes r
+        ON r.codigo = s.codigo_regiao
         LEFT JOIN meta_programas mp
-          ON mp.cod_oferta = o.codigo
-         AND mp.ano = $1
-         AND mp.mes = ANY($2::int[])
+        ON mp.cod_oferta = o.codigo
+        AND mp.ano = $1
+        AND mp.mes = ANY($2::int[])
         LEFT JOIN projetado_programas pp
-          ON pp.cod_oferta = o.codigo
-         AND pp.ano = $1
-         AND pp.mes = ANY($2::int[])
-         LEFT JOIN realizado_programas rp
+        ON pp.cod_oferta = o.codigo
+        AND pp.ano = $1
+        AND pp.mes = ANY($2::int[])
+        LEFT JOIN realizado_programas rp
         ON rp.cod_oferta = o.codigo
         AND rp.ano = $1
         AND rp.mes = ANY($2::int[])
@@ -8842,7 +9261,10 @@ async def modalidades_financiamentos(
     request: Request,
     ano: int,
     meses: str | None = None,
+    programa: str | None = None,
     modalidades: str | None = None,
+    regiao: str | None = None,
+    subregioes: str | None = None,
 ):
     meses_ids = [
         int(x) for x in (meses or "").split(",")
@@ -8860,11 +9282,49 @@ async def modalidades_financiamentos(
     filtros = ["o.ano = $1"]
     params = [ano, meses_ids]
 
+    if programa:
+        ids_programa = [
+            int(x) for x in programa.split(",")
+            if x.strip().isdigit()
+        ]
+
+        if ids_programa:
+            filtros.append(
+                f"o.cod_programa = ANY(${len(params)+1}::int[])"
+            )
+            params.append(ids_programa)
+
     if ids_modalidades:
         filtros.append(
             f"o.cod_modalidade = ANY(${len(params)+1}::int[])"
         )
         params.append(ids_modalidades)
+    
+    if regiao:
+        regioes_ids = [
+            x.strip().upper()
+            for x in regiao.split(",")
+            if x.strip()
+        ]
+
+        if regioes_ids:
+            filtros.append(
+                f"UPPER(TRIM(r.nome)) = ANY(${len(params)+1}::text[])"
+            )
+            params.append(regioes_ids)
+
+    if subregioes:
+        ids_sub = [
+            x.strip().upper()
+            for x in subregioes.split(",")
+            if x.strip()
+        ]
+
+        if ids_sub:
+            filtros.append(
+                f"UPPER(TRIM(s.nome)) = ANY(${len(params)+1}::text[])"
+            )
+            params.append(ids_sub)
 
     where = " AND ".join(filtros)
 
@@ -8891,7 +9351,16 @@ async def modalidades_financiamentos(
         FROM ofertas_programas o
 
         JOIN financiamento f
-          ON f.codigo = o.cod_financiamento
+        ON f.codigo = o.cod_financiamento
+
+        LEFT JOIN uo u
+        ON u.codigo = o.cod_uo
+
+        LEFT JOIN subregioes s
+        ON s.codigo = u.cod_subregiao
+
+        LEFT JOIN regioes r
+        ON r.codigo = s.codigo_regiao
 
         LEFT JOIN meta_programas mp
           ON mp.cod_oferta = o.codigo
@@ -8942,7 +9411,9 @@ async def modalidades_summary(
     meses: str | None = None,
     modalidades: str | None = None,
     financiamentos: str | None = None,
+    regiao: str | None = None,
     subregioes: str | None = None,
+    programa: str | None = None,
 ):
     pool = request.app.state.pool
 
@@ -8956,8 +9427,24 @@ async def modalidades_summary(
     ids = []
     filtro_fin_meta = ""
     filtro_financiamentos = ""
+    filtro_programa = ""
     ids_fin = []
     filtro_subregioes_real = ""
+    filtro_regiao_ofertas = ""
+    filtro_regiao_real = ""
+    filtro_subregioes_ofertas = ""
+
+    if programa:
+        ids_programa = [
+            int(x) for x in programa.split(",")
+            if x.strip().isdigit()
+        ]
+
+        if ids_programa:
+            filtro_programa = f"""
+            AND o.cod_programa = ANY(${len(params)+1}::int[])
+            """
+            params.append(ids_programa)
 
     if modalidades:
         ids = [int(x) for x in modalidades.split(",") if str(x).strip()]
@@ -8982,6 +9469,34 @@ async def modalidades_summary(
                 FROM ofertas_filtradas
             )
             """
+    
+    if regiao:
+        regioes_ids = [
+            x.strip().upper()
+            for x in regiao.split(",")
+            if x.strip()
+        ]
+
+        if regioes_ids:
+            filtro_regiao_ofertas = f"""
+            AND EXISTS (
+                SELECT 1
+                FROM uo u_reg
+                JOIN subregioes s_reg
+                ON s_reg.codigo = u_reg.cod_subregiao
+                JOIN regioes r_reg
+                ON r_reg.codigo = s_reg.codigo_regiao
+                WHERE u_reg.codigo = o.cod_uo
+                AND UPPER(TRIM(r_reg.nome)) = ANY(${len(params)+1}::text[])
+            )
+            """
+
+            filtro_regiao_ofertas = f"""
+            AND UPPER(TRIM(r.nome)) = ANY(${len(params)+1}::text[])
+            """
+
+            params.append(regioes_ids)
+    
     if subregioes:
         ids_sub = [
             x.strip().upper()
@@ -8990,17 +9505,8 @@ async def modalidades_summary(
         ]
 
         if ids_sub:
-            filtro_subregioes_real = f"""
-            AND EXISTS (
-                SELECT 1
-                FROM ofertas_programas o_sub
-                JOIN uo u_sub
-                ON u_sub.codigo = o_sub.cod_uo
-                JOIN subregioes s_sub
-                ON s_sub.codigo = u_sub.cod_subregiao
-                WHERE o_sub.codigo = rp.cod_oferta
-                AND UPPER(TRIM(s_sub.nome)) = ANY(${len(params)+1}::text[])
-            )
+            filtro_subregioes_ofertas = f"""
+            AND UPPER(TRIM(s.nome)) = ANY(${len(params)+1}::text[])
             """
             params.append(ids_sub)
 
@@ -9025,9 +9531,18 @@ async def modalidades_summary(
         FROM ofertas_programas o
         LEFT JOIN financiamento f
         ON f.codigo = o.cod_financiamento
+        LEFT JOIN uo u
+        ON u.codigo = o.cod_uo
+        LEFT JOIN subregioes s
+        ON s.codigo = u.cod_subregiao
+        LEFT JOIN regioes r
+        ON r.codigo = s.codigo_regiao
         WHERE o.ano = $1
+        {filtro_programa}
         {filtro_modalidades}
         {filtro_financiamentos}
+        {filtro_regiao_ofertas}
+        {filtro_subregioes_ofertas}
     ),
     programas_filtrados AS (
         SELECT DISTINCT
@@ -9060,18 +9575,30 @@ async def modalidades_summary(
 
     real_total AS (
         SELECT
-            COALESCE(SUM(rp.matriculas_real), 0) AS mat_real,
-            COALESCE(SUM(rp.ha_real), 0) AS ha_real,
-            COALESCE(SUM(rp.receita_real), 0) AS rec_real
+            COALESCE(SUM(x.matriculas_real), 0) AS mat_real,
+            COALESCE(SUM(x.ha_real), 0) AS ha_real,
+            COALESCE(SUM(x.receita_real), 0) AS rec_real
         FROM (
-            SELECT DISTINCT cod_oferta
-            FROM ofertas_filtradas
-        ) of
-        LEFT JOIN realizado_programas rp
-        ON rp.cod_oferta = of.cod_oferta
-        AND rp.ano = $1
-        AND rp.mes = ANY($2::int[])
-        {filtro_subregioes_real}
+            SELECT
+                rp.cod_oferta,
+                rp.ano,
+                rp.mes,
+                MAX(COALESCE(rp.matriculas_real, 0)) AS matriculas_real,
+                SUM(COALESCE(rp.ha_real, 0)) AS ha_real,
+                SUM(COALESCE(rp.receita_real, 0)) AS receita_real
+            FROM (
+                SELECT DISTINCT cod_oferta
+                FROM ofertas_filtradas
+            ) of
+            JOIN realizado_programas rp
+            ON rp.cod_oferta = of.cod_oferta
+            AND rp.ano = $1
+            AND rp.mes = ANY($2::int[])
+            GROUP BY
+                rp.cod_oferta,
+                rp.ano,
+                rp.mes
+        ) x
     )
     SELECT
         mt.mat_meta,
@@ -9090,6 +9617,7 @@ async def modalidades_summary(
     CROSS JOIN real_total rt
     """
 
+    print("PARAMS:", params)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(sql, *params)
 
@@ -9356,16 +9884,441 @@ async def modalidades_tabela_programas(
 
     return resultado
 
+@router.get("/modalidades/tabela/modalidades")
+async def modalidades_tabela_modalidades(
+    request: Request,
+    ano: int = 2026,
+    meses: str | None = None,
+    modalidades: str | None = None,
+    financiamentos: str | None = None,
+    regiao: str | None = None,
+    subregioes: str | None = None,
+    programa: str | None = None,
+):
+    pool = request.app.state.pool
+
+    meses_ids = [int(x) for x in (meses or "").split(",") if x.strip().isdigit()]
+
+    if not meses_ids:
+        meses_ids = list(range(1, 13))
+
+    params = [ano, meses_ids]
+    filtro_modalidades = ""
+    filtro_financiamentos = ""
+    filtro_programa = ""
+    filtro_subregioes_real = ""
+    filtro_regiao_ofertas = ""
+    filtro_regiao_real = ""
+    filtro_subregioes_ofertas = ""
+
+    if programa:
+        ids_programa = [
+            int(x) for x in programa.split(",")
+            if x.strip().isdigit()
+        ]
+
+        if ids_programa:
+            filtro_programa = f"""
+            AND o.cod_programa = ANY(${len(params)+1}::int[])
+            """
+            params.append(ids_programa)
+
+    if modalidades:
+        ids = [int(x) for x in modalidades.split(",") if str(x).strip()]
+        if ids:
+            filtro_modalidades = f" AND o.cod_modalidade = ANY(${len(params)+1}::int[])"
+            params.append(ids)
+
+    if financiamentos:
+        ids_fin = [int(x) for x in financiamentos.split(",") if str(x).strip()]
+        if ids_fin:
+            filtro_financiamentos = f" AND o.cod_financiamento = ANY(${len(params)+1}::int[])"
+            params.append(ids_fin)
+
+    if regiao:
+        regioes_ids = [
+            x.strip().upper()
+            for x in regiao.split(",")
+            if x.strip()
+        ]
+
+        if regioes_ids:
+            filtro_regiao_ofertas = f"""
+            AND UPPER(TRIM(r.nome)) = ANY(${len(params)+1}::text[])
+            """
+
+            filtro_regiao_real = f"""
+            AND EXISTS (
+                SELECT 1
+                FROM ofertas_programas o_reg
+                JOIN uo u_reg
+                ON u_reg.codigo = o_reg.cod_uo
+                JOIN subregioes s_reg
+                ON s_reg.codigo = u_reg.cod_subregiao
+                JOIN regioes r_reg
+                ON r_reg.codigo = s_reg.codigo_regiao
+                WHERE o_reg.codigo = rp.cod_oferta
+                AND UPPER(TRIM(r_reg.nome)) = ANY(${len(params)+1}::text[])
+            )
+            """
+
+            params.append(regioes_ids)
+    
+    if subregioes:
+        ids_sub = [
+            x.strip().upper()
+            for x in subregioes.split(",")
+            if x.strip()
+        ]
+
+        if ids_sub:
+            filtro_subregioes_ofertas = f"""
+            AND UPPER(TRIM(s.nome)) = ANY(${len(params)+1}::text[])
+            """
+            params.append(ids_sub)
+
+    sql = f"""
+    WITH ofertas_filtradas AS (
+        SELECT DISTINCT
+            o.codigo AS cod_oferta,
+            o.cod_modalidade,
+            COALESCE(m.nome, 'SEM MODALIDADE') AS modalidade
+        FROM ofertas_programas o
+        LEFT JOIN modalidade m
+        ON m.codigo = o.cod_modalidade
+        LEFT JOIN uo u
+        ON u.codigo = o.cod_uo
+        LEFT JOIN subregioes s
+        ON s.codigo = u.cod_subregiao
+        LEFT JOIN regioes r
+        ON r.codigo = s.codigo_regiao
+        WHERE o.ano = $1
+        {filtro_programa}
+        {filtro_modalidades}
+        {filtro_financiamentos}
+        {filtro_regiao_ofertas}
+        {filtro_subregioes_ofertas}
+    ),
+    modalidades_filtradas AS (
+
+        -- modalidades com planejamento
+        SELECT DISTINCT
+            of.cod_modalidade,
+            of.modalidade
+        FROM ofertas_filtradas of
+        JOIN meta_programas mp
+          ON mp.cod_oferta = of.cod_oferta
+         AND mp.ano = $1
+         AND mp.mes = ANY($2::int[])
+
+        UNION
+
+        -- modalidades com projetado
+        SELECT DISTINCT
+            of.cod_modalidade,
+            of.modalidade
+        FROM ofertas_filtradas of
+        JOIN projetado_programas pp
+          ON pp.cod_oferta = of.cod_oferta
+         AND pp.ano = $1
+         AND pp.mes = ANY($2::int[])
+
+        UNION
+
+        -- modalidades com realizado
+        SELECT DISTINCT
+            of.cod_modalidade,
+            of.modalidade
+        FROM ofertas_filtradas of
+        JOIN realizado_programas rp
+          ON rp.cod_oferta = of.cod_oferta
+         AND rp.ano = $1
+         AND rp.mes = ANY($2::int[])
+         {filtro_regiao_real}
+        {filtro_subregioes_real}
+        WHERE
+            COALESCE(rp.matriculas_real,0) <> 0
+            OR COALESCE(rp.ha_real,0) <> 0
+            OR COALESCE(rp.receita_real,0) <> 0
+    ),
+    meta_mes AS (
+        SELECT
+            of.cod_modalidade,
+            COALESCE(SUM(mp.matriculas_meta), 0) AS matriculas_meta,
+            COALESCE(SUM(mp.ha_meta), 0) AS ha_meta,
+            COALESCE(SUM(mp.receita_meta), 0) AS receita_meta,
+            COUNT(mp.cod_oferta) AS qtd_linhas_planejamento
+        FROM ofertas_filtradas of
+        LEFT JOIN meta_programas mp
+          ON mp.cod_oferta = of.cod_oferta
+         AND mp.ano = $1
+         AND mp.mes = ANY($2::int[])
+        GROUP BY of.cod_modalidade
+    ),
+    proj_mes AS (
+        SELECT
+            of.cod_modalidade,
+            SUM(COALESCE(pp.matriculas_proj, 0)) AS matriculas_proj,
+            SUM(COALESCE(pp.ha_proj, 0)) AS ha_proj,
+            SUM(COALESCE(pp.receita_proj, 0)) AS receita_proj
+        FROM ofertas_filtradas of
+        LEFT JOIN projetado_programas pp
+          ON pp.cod_oferta = of.cod_oferta
+         AND pp.ano = $1
+         AND pp.mes = ANY($2::int[])
+        GROUP BY of.cod_modalidade
+    ),
+    real_mes AS (
+        SELECT
+            x.cod_modalidade,
+            COALESCE(SUM(x.matriculas_real), 0) AS matriculas_real,
+            COALESCE(SUM(x.ha_real), 0) AS ha_real,
+            COALESCE(SUM(x.receita_real), 0) AS receita_real
+        FROM (
+            SELECT
+                of.cod_modalidade,
+                rp.cod_oferta,
+                rp.ano,
+                rp.mes,
+                MAX(COALESCE(rp.matriculas_real, 0)) AS matriculas_real,
+                SUM(COALESCE(rp.ha_real, 0)) AS ha_real,
+                SUM(COALESCE(rp.receita_real, 0)) AS receita_real
+            FROM ofertas_filtradas of
+            JOIN realizado_programas rp
+            ON rp.cod_oferta = of.cod_oferta
+            AND rp.ano = $1
+            AND rp.mes = ANY($2::int[])
+            {filtro_regiao_real}
+            {filtro_subregioes_real}
+            GROUP BY
+                of.cod_modalidade,
+                rp.cod_oferta,
+                rp.ano,
+                rp.mes
+        ) x
+        GROUP BY x.cod_modalidade
+    )
+    SELECT
+        mf.cod_modalidade,
+        mf.modalidade,
+        COALESCE(m.matriculas_meta, 0) AS matriculas_meta,
+        COALESCE(pj.matriculas_proj, 0) AS matriculas_proj,
+        COALESCE(r.matriculas_real, 0) AS matriculas_real,
+        COALESCE(m.ha_meta, 0) AS ha_meta,
+        COALESCE(pj.ha_proj, 0) AS ha_proj,
+        COALESCE(r.ha_real, 0) AS ha_real,
+        COALESCE(m.receita_meta, 0) AS receita_meta,
+        COALESCE(m.qtd_linhas_planejamento, 0) AS qtd_linhas_planejamento,
+        COALESCE(pj.receita_proj, 0) AS receita_proj,
+        COALESCE(r.receita_real, 0) AS receita_real
+    FROM modalidades_filtradas mf
+    LEFT JOIN meta_mes m
+      ON m.cod_modalidade = mf.cod_modalidade
+    LEFT JOIN proj_mes pj
+      ON pj.cod_modalidade = mf.cod_modalidade
+    LEFT JOIN real_mes r
+      ON r.cod_modalidade = mf.cod_modalidade
+    WHERE
+        COALESCE(m.qtd_linhas_planejamento,0) > 0
+        OR COALESCE(r.matriculas_real,0) > 0
+        OR COALESCE(r.ha_real,0) > 0
+        OR COALESCE(r.receita_real,0) > 0
+    ORDER BY mf.modalidade
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+
+    return [dict(r) for r in rows]
+
 @router.get("/modalidades/subregioes")
 async def modalidades_subregioes(
     request: Request,
     ano: int = 2026,
+    regiao: str | None = None,
+    programa: str | None = None,
+    modalidades: str | None = None,
+    financiamentos: str | None = None,
 ):
     pool = request.app.state.pool
 
-    sql = """
+    params = [ano]
+    filtro_regiao = ""
+    filtro_programa = ""
+    filtro_modalidades = ""
+    filtro_financiamentos = ""
+
+    if regiao:
+        regioes_ids = [
+            x.strip().upper()
+            for x in regiao.split(",")
+            if x.strip()
+        ]
+
+        if regioes_ids:
+            filtro_regiao = f"""
+            AND UPPER(TRIM(r.nome)) = ANY(${len(params)+1}::text[])
+            """
+            params.append(regioes_ids)
+    
+    if programa:
+        ids_programa = [
+            int(x) for x in programa.split(",")
+            if x.strip().isdigit()
+        ]
+
+        if ids_programa:
+            filtro_programa = f"""
+            AND rp.cod_programa = ANY(${len(params)+1}::int[])
+            """
+            params.append(ids_programa)
+
+    if modalidades:
+        ids_modalidades = [
+            int(x) for x in modalidades.split(",")
+            if x.strip().isdigit()
+        ]
+
+        if ids_modalidades:
+            filtro_modalidades = f"""
+            AND o.cod_modalidade = ANY(${len(params)+1}::int[])
+            """
+            params.append(ids_modalidades)
+
+    if financiamentos:
+        ids_financiamentos = [
+            int(x) for x in financiamentos.split(",")
+            if x.strip().isdigit()
+        ]
+
+        if ids_financiamentos:
+            filtro_financiamentos = f"""
+            AND o.cod_financiamento = ANY(${len(params)+1}::int[])
+            """
+            params.append(ids_financiamentos)
+
+    sql = f"""
     SELECT DISTINCT
         UPPER(TRIM(s.nome)) AS subregiao
+    FROM realizado_programas rp
+    JOIN ofertas_programas o
+    ON o.codigo = rp.cod_oferta
+    JOIN uo u
+    ON u.codigo = o.cod_uo
+    JOIN subregioes s
+    ON s.codigo = u.cod_subregiao
+    JOIN regioes r
+    ON r.codigo = s.codigo_regiao
+    WHERE rp.ano = $1
+    AND s.nome IS NOT NULL
+    AND TRIM(s.nome) <> ''
+    {filtro_regiao}
+    {filtro_programa}
+    {filtro_modalidades}
+    {filtro_financiamentos}
+    ORDER BY subregiao
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+
+    return [dict(r) for r in rows]
+
+@router.get("/modalidades/regioes")
+async def modalidades_regioes(
+    request: Request,
+    ano: int = 2026,
+    programa: str | None = None,
+    meses: str | None = None,
+    modalidades: str | None = None,
+    financiamentos: str | None = None,
+    subregioes: str | None = None,
+):
+    pool = request.app.state.pool
+
+    params = [ano]
+
+    filtros = [
+        "rp.ano = $1",
+        "r.nome IS NOT NULL",
+        "TRIM(r.nome) <> ''"
+    ]
+
+    if meses:
+        ids_meses = [
+            int(x) for x in meses.split(",")
+            if x.strip().isdigit()
+        ]
+
+        if ids_meses:
+            filtros.append(
+                f"rp.mes = ANY(${len(params)+1}::int[])"
+            )
+            params.append(ids_meses)
+
+    if programa:
+        ids_programa = [
+            int(x) for x in programa.split(",")
+            if x.strip().isdigit()
+        ]
+
+        if ids_programa:
+            filtros.append(
+                f"""
+                (
+                    o.cod_programa = ANY(${len(params)+1}::int[])
+                    OR CASE
+                        WHEN o.cod_programa = 29 THEN 11
+                        WHEN o.cod_programa = 30 THEN 7
+                        ELSE o.cod_programa
+                    END = ANY(${len(params)+1}::int[])
+                )
+                """
+            )
+            params.append(ids_programa)
+
+    if modalidades:
+        ids_modalidades = [
+            int(x) for x in modalidades.split(",")
+            if x.strip().isdigit()
+        ]
+
+        if ids_modalidades:
+            filtros.append(
+                f"o.cod_modalidade = ANY(${len(params)+1}::int[])"
+            )
+            params.append(ids_modalidades)
+
+    if financiamentos:
+        ids_financiamentos = [
+            int(x) for x in financiamentos.split(",")
+            if x.strip().isdigit()
+        ]
+
+        if ids_financiamentos:
+            filtros.append(
+                f"o.cod_financiamento = ANY(${len(params)+1}::int[])"
+            )
+            params.append(ids_financiamentos)
+
+    if subregioes:
+        ids_subregioes = [
+            x.strip().upper()
+            for x in subregioes.split(",")
+            if x.strip()
+        ]
+
+        if ids_subregioes:
+            filtros.append(
+                f"UPPER(TRIM(s.nome)) = ANY(${len(params)+1}::text[])"
+            )
+            params.append(ids_subregioes)
+
+    where = " AND ".join(filtros)
+
+    sql = f"""
+    SELECT DISTINCT
+        UPPER(TRIM(r.nome)) AS regiao
     FROM realizado_programas rp
     JOIN ofertas_programas o
       ON o.codigo = rp.cod_oferta
@@ -9373,14 +10326,108 @@ async def modalidades_subregioes(
       ON u.codigo = o.cod_uo
     JOIN subregioes s
       ON s.codigo = u.cod_subregiao
-    WHERE rp.ano = $1
-      AND s.nome IS NOT NULL
-      AND TRIM(s.nome) <> ''
-    ORDER BY subregiao
+    JOIN regioes r
+      ON r.codigo = s.codigo_regiao
+    WHERE {where}
+    ORDER BY regiao
     """
 
     async with pool.acquire() as conn:
-        rows = await conn.fetch(sql, ano)
+        rows = await conn.fetch(sql, *params)
+
+    return [dict(r) for r in rows]
+
+@router.get("/modalidades/programas")
+async def modalidades_programas(
+    request: Request,
+    ano: int = 2026,
+    financiamentos: str | None = None,
+    modalidades: str | None = None,
+    regiao: str | None = None,
+    subregioes: str | None = None,
+):
+    pool = request.app.state.pool
+
+    params = [ano]
+    filtros = [
+        "rp.ano = $1",
+        "p.nome_programa IS NOT NULL",
+        "TRIM(p.nome_programa) <> ''"
+    ]
+
+    if financiamentos:
+        ids_fin = [
+            int(x) for x in financiamentos.split(",")
+            if x.strip().isdigit()
+        ]
+
+        if ids_fin:
+            filtros.append(
+                f"o.cod_financiamento = ANY(${len(params)+1}::int[])"
+            )
+            params.append(ids_fin)
+
+    if modalidades:
+        ids_modalidades = [
+            int(x) for x in modalidades.split(",")
+            if x.strip().isdigit()
+        ]
+
+        if ids_modalidades:
+            filtros.append(
+                f"o.cod_modalidade = ANY(${len(params)+1}::int[])"
+            )
+            params.append(ids_modalidades)
+
+    if regiao:
+        regioes_ids = [
+            x.strip().upper()
+            for x in regiao.split(",")
+            if x.strip()
+        ]
+
+        if regioes_ids:
+            filtros.append(
+                f"UPPER(TRIM(r.nome)) = ANY(${len(params)+1}::text[])"
+            )
+            params.append(regioes_ids)
+
+    if subregioes:
+        ids_sub = [
+            x.strip().upper()
+            for x in subregioes.split(",")
+            if x.strip()
+        ]
+
+        if ids_sub:
+            filtros.append(
+                f"UPPER(TRIM(s.nome)) = ANY(${len(params)+1}::text[])"
+            )
+            params.append(ids_sub)
+
+    where = " AND ".join(filtros)
+
+    sql = f"""
+    SELECT DISTINCT
+        p.codigo,
+        UPPER(TRIM(p.nome_programa)) AS programa
+    FROM realizado_programas rp
+    JOIN ofertas_programas o
+      ON o.codigo = rp.cod_oferta
+    JOIN programas p
+      ON p.codigo = o.cod_programa
+    LEFT JOIN uo u
+      ON u.codigo = o.cod_uo
+    LEFT JOIN subregioes s
+      ON s.codigo = u.cod_subregiao
+    LEFT JOIN regioes r
+      ON r.codigo = s.codigo_regiao
+    WHERE {where}
+    ORDER BY programa
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
 
     return [dict(r) for r in rows]
 
@@ -14089,6 +15136,7 @@ async def performance_financiamento_resumo(
     meses: str | None = None,
     programas: str | None = None,
     subregioes: str | None = None,
+    crs: str | None = None,
 ):
     pool = request.app.state.pool
 
@@ -14111,6 +15159,12 @@ async def performance_financiamento_resumo(
         int(x)
         for x in (subregioes or "").split(",")
         if x.strip().isdigit()
+    ]
+
+    cr_ids = [
+        x.strip()
+        for x in (crs or "").split(",")
+        if x.strip()
     ]
 
     campo_valor = {
@@ -14143,9 +15197,15 @@ async def performance_financiamento_resumo(
 
     if sub_ids:
         filtros.append(
-            f"o.cod_subregiao = ANY(${len(params)+1}::int[])"
+            f"CAST(u.cod_subregiao AS integer) = ANY(${len(params)+1}::int[])"
         )
         params.append(sub_ids)
+    
+    if cr_ids:
+        filtros.append(
+            f"TRIM(COALESCE(o.cr::text, '')) = ANY(${len(params)+1}::text[])"
+        )
+        params.append(cr_ids)
 
     where = " AND ".join(filtros)
 
@@ -14173,6 +15233,9 @@ async def performance_financiamento_resumo(
         JOIN ofertas_programas o
             ON o.codigo = rp.cod_oferta
 
+        JOIN uo u
+            ON u.codigo = o.cod_uo
+
         JOIN financiamento f
             ON f.codigo = o.cod_financiamento
 
@@ -14196,6 +15259,76 @@ async def performance_financiamento_resumo(
         dict(r)
         for r in rows
     ]
+
+@router.get("/performance/filtros/crs")
+async def performance_filtros_crs(
+    request: Request,
+    ano: int = 2026,
+    programas: str | None = None,
+    regiao: str | None = None,
+    subregioes: str | None = None,
+):
+    pool = request.app.state.pool
+
+    params = []
+    filtros = [
+        "cp.cr IS NOT NULL",
+        "TRIM(cp.cr) <> ''"
+    ]
+
+    if programas:
+        ids_programas = [
+            int(x) for x in programas.split(",")
+            if x.strip().isdigit()
+        ]
+
+        if ids_programas:
+            filtros.append(
+                f"cp.cod_programa = ANY(${len(params)+1}::int[])"
+            )
+            params.append(ids_programas)
+
+    if regiao:
+        filtros.append(
+            f"UPPER(TRIM(r.nome)) = UPPER(TRIM(${len(params)+1}::text))"
+        )
+        params.append(regiao)
+
+    if subregioes:
+        ids_subregioes = [
+            int(x) for x in subregioes.split(",")
+            if x.strip().isdigit()
+        ]
+
+        if ids_subregioes:
+            filtros.append(
+                f"CAST(u.cod_subregiao AS integer) = ANY(${len(params)+1}::int[])"
+            )
+            params.append(ids_subregioes)
+
+    where = " AND ".join(filtros)
+
+    sql = f"""
+    SELECT DISTINCT
+        cp.cr,
+        cp.descricao
+    FROM cr_planejamento cp
+    LEFT JOIN ofertas_programas o
+      ON TRIM(o.cr::text) = TRIM(cp.cr::text)
+    LEFT JOIN uo u
+      ON u.codigo = o.cod_uo
+    LEFT JOIN subregioes s
+      ON s.codigo = CAST(u.cod_subregiao AS integer)
+    LEFT JOIN regioes r
+      ON r.codigo = s.codigo_regiao
+    WHERE {where}
+    ORDER BY cp.cr, cp.descricao
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+
+    return [dict(r) for r in rows]
 
 @router.get("/importacoes/data/ultimo")
 async def ultimo_lote_data(request: Request):
@@ -15614,3 +16747,19 @@ async def opcoes_filtros_turmas(
             "subregioes": row["subregioes"] or [],
             "uos": row["uos"] or [],
         }
+    
+@router.post("/executivo/relatorios/carteira-programas")
+async def gerar_relatorio_carteira_programas(
+    request: Request,
+    payload: dict
+):
+    arquivo = await gerar_pptx_carteira_programas(
+        request=request,
+        filtros=payload
+    )
+
+    return FileResponse(
+        path=arquivo,
+        filename="carteira_de_programas.pptx",
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    )
