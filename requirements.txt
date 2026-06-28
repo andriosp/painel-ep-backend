@@ -8,3 +8,4 @@ openpyxl
 bcrypt
 PyJWT
 reportlab
+python-pptx
