@@ -316,6 +316,7 @@ def aplicar_filtros_turmas_base(
     modalidade: str | None = None,
     programa: str | None = None,
     turma: str | None = None,
+    incompany: str | None = None,
     condicao_aluno: str | None = None,
     dt_inicio_de: str | None = None,
     dt_inicio_ate: str | None = None,
@@ -341,6 +342,11 @@ def aplicar_filtros_turmas_base(
     if turma:
         sql += f" AND {alias_t}.codigo_sge = ${idx}"
         params.append(turma)
+        idx += 1
+    
+    if incompany in ("true", "false"):
+        sql += f" AND COALESCE({alias_t}.incompany, FALSE) = ${idx}"
+        params.append(incompany == "true")
         idx += 1
 
     if condicao_aluno:
@@ -2828,6 +2834,7 @@ async def sge_turmas_summary(
     modalidade: str | None = None,
     programa: str | None = None,
     turma: str | None = None,
+    incompany: str | None = None,
     condicao_aluno: str | None = None,
     dt_inicio_de: str | None = None,
     dt_inicio_ate: str | None = None,
@@ -2920,6 +2927,7 @@ async def sge_turmas_summary(
             uo=uo,
             curso=curso,
             turma=turma,
+            incompany=incompany,
             condicao_aluno=condicao_aluno,
             modalidade=modalidade,
             programa=programa,
@@ -2971,7 +2979,7 @@ async def sge_turmas_summary(
             sql_cond, params_cond, idx_cond = aplicar_filtros_turmas_base(
                 sql_cond, params_cond, idx_cond,
                 alias_t="t", alias_c="c", alias_u="u", alias_frm="frm", alias_trn="trn", alias_tsr="tsr",
-                uo=uo, curso=curso, turma=turma, condicao_aluno=None,
+                uo=uo, curso=curso, turma=turma, incompany=incompany, condicao_aluno=None,
                 dt_inicio_de=dt_inicio_de, dt_inicio_ate=dt_inicio_ate,
                 formato=formato, turno=turno, status_matricula=status_matricula,
                 modalidade=modalidade,
@@ -3058,6 +3066,7 @@ async def grafico_resumo(
     modalidade: str | None = None,
     programa: str | None = None,
     turma: str | None = None,
+    incompany: str | None = None,
     condicao_aluno: str | None = None,
     dt_inicio_de: str | None = None,
     dt_inicio_ate: str | None = None,
@@ -3097,6 +3106,7 @@ async def grafico_resumo(
             SELECT
                 t.codigo,
                 t.codigo_sge,
+                t.incompany,
                 t.vagas_total,
                 t.lote_origem_data_id,
                 t.data_inicio,
@@ -3141,6 +3151,7 @@ async def grafico_resumo(
             modalidade=modalidade,
             programa=programa,
             turma=turma,
+            incompany=incompany,
             condicao_aluno=condicao_aluno,
             dt_inicio_de=dt_inicio_de,
             dt_inicio_ate=dt_inicio_ate,
@@ -3240,6 +3251,7 @@ async def grafico_resumo(
                 uo=uo,
                 curso=curso,
                 turma=turma,
+                incompany=incompany,
                 modalidade=modalidade,
                 programa=programa,
                 condicao_aluno=None,
@@ -3329,6 +3341,7 @@ async def grafico_resumo(
                 uo=uo,
                 curso=curso,
                 turma=turma,
+                incompany=incompany,
                 modalidade=modalidade,
                 programa=programa,
                 condicao_aluno=None,
@@ -3383,6 +3396,7 @@ async def grafico_resumo(
                 uo=uo,
                 curso=curso,
                 turma=turma,
+                incompany=incompany,
                 modalidade=modalidade,
                 programa=programa,
                 condicao_aluno=condicao_aluno,
@@ -3425,6 +3439,7 @@ async def grafico_faixas_preenchimento(
     modalidade: str | None = None,
     programa: str | None = None,
     turma: str | None = None,
+    incompany: str | None = None,
     condicao_aluno: str | None = None,
     dt_inicio_de: str | None = None,
     dt_inicio_ate: str | None = None,
@@ -3537,6 +3552,7 @@ async def grafico_faixas_preenchimento(
                 modalidade=modalidade,
                 programa=programa,
                 turma=turma,
+                incompany=incompany,
                 condicao_aluno=None,
                 dt_inicio_de=dt_inicio_de,
                 dt_inicio_ate=dt_inicio_ate,
@@ -3625,6 +3641,7 @@ async def grafico_faixas_preenchimento(
             SELECT
                 t.codigo,
                 t.codigo_sge,
+                t,incompany,
                 t.vagas_total,
                 t.lote_origem_data_id,
                 t.data_inicio,
@@ -3669,6 +3686,7 @@ async def grafico_faixas_preenchimento(
             modalidade=modalidade,
             programa=programa,
             turma=turma,
+            incompany=incompany,
             condicao_aluno=condicao_aluno,
             dt_inicio_de=dt_inicio_de,
             dt_inicio_ate=dt_inicio_ate,
@@ -3736,6 +3754,7 @@ async def grafico_faixas_preenchimento(
                     modalidade=modalidade,
                     programa=programa,
                     turma=turma,
+                    incompany=incompany,
                     condicao_aluno=condicao_aluno,
                     dt_inicio_de=dt_inicio_de,
                     dt_inicio_ate=dt_inicio_ate,
@@ -3773,6 +3792,7 @@ async def grafico_matriculas_mes(
     modalidade: str | None = None,
     programa: str | None = None,
     turma: str | None = None,
+    incompany: str | None = None,
     condicao_aluno: str | None = None,
     dt_inicio_de: str | None = None,
     dt_inicio_ate: str | None = None,
@@ -3875,6 +3895,7 @@ async def grafico_matriculas_mes(
                 modalidade=modalidade,
                 programa=programa,
                 turma=turma,
+                incompany=incompany,
                 condicao_aluno=None,
                 dt_inicio_de=dt_inicio_de,
                 dt_inicio_ate=dt_inicio_ate,
@@ -3935,6 +3956,7 @@ async def grafico_matriculas_mes(
             modalidade=modalidade,
             programa=programa,
             turma=turma,
+            incompany=incompany,
             condicao_aluno=condicao_aluno,
             dt_inicio_de=dt_inicio_de,
             dt_inicio_ate=dt_inicio_ate,
@@ -3979,6 +4001,7 @@ async def sge_turmas_estado(
     modalidade: str | None = None,
     programa: str | None = None,
     turma: str | None = None,
+    incompany: str | None = None,
     condicao_aluno: str | None = None,
     dt_inicio_de: str | None = None,
     dt_inicio_ate: str | None = None,
@@ -4146,6 +4169,7 @@ async def sge_turmas_estado(
                 modalidade=modalidade,
                 programa=programa,
                 turma=turma,
+                incompany=incompany,
                 condicao_aluno=None,
                 dt_inicio_de=dt_inicio_de,
                 dt_inicio_ate=dt_inicio_ate,
@@ -4265,6 +4289,7 @@ async def sge_turmas_estado(
             SELECT
                 t.codigo,
                 t.codigo_sge,
+                t.incompany,
                 t.vagas_total,
                 t.lote_origem_data_id,
                 t.data_inicio,
@@ -4313,6 +4338,7 @@ async def sge_turmas_estado(
             modalidade=modalidade,
             programa=programa,
             turma=turma,
+            incompany=incompany,
             condicao_aluno=None,
             dt_inicio_de=dt_inicio_de,
             dt_inicio_ate=dt_inicio_ate,
@@ -4360,6 +4386,7 @@ async def sge_turmas_tabela_uo(
     modalidade: str | None = None,
     programa: str | None = None,
     turma: str | None = None,
+    incompany: str | None = None,
     dt_inicio_de: str | None = None,
     dt_inicio_ate: str | None = None,
     formato: str | None = None,
@@ -4469,6 +4496,7 @@ async def sge_turmas_tabela_uo(
                 modalidade=modalidade,
                 programa=programa,
                 turma=turma,
+                incompany=incompany,
                 condicao_aluno=None,
                 dt_inicio_de=dt_inicio_de,
                 dt_inicio_ate=dt_inicio_ate,
@@ -4575,6 +4603,7 @@ async def sge_turmas_tabela_uo(
             SELECT
                 t.codigo,
                 t.codigo_sge,
+                t,incompany,
                 t.vagas_total,
                 t.data_inicio,
                 t.data_fim,
@@ -4642,6 +4671,7 @@ async def sge_turmas_tabela_uo(
             modalidade=modalidade,
             programa=programa,
             turma=turma,
+            incompany=incompany,
             condicao_aluno=condicao_aluno,
             dt_inicio_de=dt_inicio_de,
             dt_inicio_ate=dt_inicio_ate,
@@ -4694,6 +4724,7 @@ async def sge_turmas_tabela_uo(
             modalidade=modalidade,
             programa=programa,
             turma=turma,
+            incompany=incompany,
             condicao_aluno=condicao_aluno,
             dt_inicio_de=dt_inicio_de,
             dt_inicio_ate=dt_inicio_ate,
@@ -13277,6 +13308,12 @@ async def importar_data(request: Request, arquivo: UploadFile = File(...)):
                 formato = norm_text(v(row, "formato_turma", "Formato Turma", "TIPO_MEDIACAOTURMA"))
                 turno = norm_text(v(row, "turno", "Turno", "TURNO"))
                 vagas = norm_int(v(row, "vagas", "Vagas", "VAGAS", "nro_max_previstos_alunos", "NRO_MAX_PREVISTOS_ALUNOS", "NRO_MAX_PREVISTOS_ALUNOS", "NRO MAX PREVISTOS ALUNOS"))
+                incompany_raw = v(row, "incompany", "INCOMPANY", "Incompany", "In Company", "IN COMPANY")
+
+                incompany = False
+                if incompany_raw is not None and not pd.isna(incompany_raw):
+                    s = str(incompany_raw).strip().upper()
+                    incompany = s in ("SIM", "S", "YES", "Y", "TRUE", "1")
 
                 if vagas is not None and vagas > 5000:
                     vagas = 0
@@ -13316,6 +13353,7 @@ async def importar_data(request: Request, arquivo: UploadFile = File(...)):
                     cnpj,
                     data_ini_contratoapr,
                     data_fim_contratoapr,
+                    incompany,
                     idx + 2
                 ))
 
@@ -13350,11 +13388,12 @@ async def importar_data(request: Request, arquivo: UploadFile = File(...)):
                         cnpj,
                         data_ini_contratoapr,
                         data_fim_contratoapr,
+                        incompany,
                         linha_numero
                     )
                     VALUES (
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-                        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26
+                        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27
                     )
                     """,
                     registros
@@ -13613,6 +13652,7 @@ async def processar_data(request: Request, lote_id: int):
                         r["cnpj"],
                         r["data_inicio"],
                         r["data_fim"],
+                        r["incompany"] or False,
                         r["data_ini_contratoapr"],
                         r["data_fim_contratoapr"],
                         r["vagas"] or 0,
@@ -13631,6 +13671,7 @@ async def processar_data(request: Request, lote_id: int):
                         r["cnpj"],
                         r["data_inicio"],
                         r["data_fim"],
+                        r["incompany"] or False,
                         r["data_ini_contratoapr"],
                         r["data_fim_contratoapr"],
                         r["vagas"] or 0,
@@ -13681,12 +13722,13 @@ async def processar_data(request: Request, lote_id: int):
                         cnpj = $8,
                         data_inicio = $9,
                         data_fim = $10,
-                        data_ini_contratoapr = $11,
-                        data_fim_contratoapr = $12,
-                        vagas_total = COALESCE($13, 0),
-                        ano_referencia = $14,
+                        incompany = $11,
+                        data_ini_contratoapr = $12,
+                        data_fim_contratoapr = $13,
+                        vagas_total = COALESCE($14, 0),
+                        ano_referencia = $15,
                         data_atualizacao = CURRENT_TIMESTAMP,
-                        lote_origem_data_id = $15
+                        lote_origem_data_id = $16
                     WHERE codigo_sge = $1
                     """,
                     list(turmas_update_buffer.values())
@@ -13706,6 +13748,7 @@ async def processar_data(request: Request, lote_id: int):
                         cnpj,
                         data_inicio,
                         data_fim,
+                        incompany,
                         data_ini_contratoapr,
                         data_fim_contratoapr,
                         vagas_total,
@@ -13723,6 +13766,7 @@ async def processar_data(request: Request, lote_id: int):
                         x.cnpj,
                         x.data_inicio,
                         x.data_fim,
+                        x.incompany,
                         x.data_ini_contratoapr,
                         x.data_fim_contratoapr,
                         x.vagas_total,
@@ -13739,11 +13783,12 @@ async def processar_data(request: Request, lote_id: int):
                         $8::text[],
                         $9::date[],
                         $10::date[],
-                        $11::date[],
+                        $11::bool[],
                         $12::date[],
-                        $13::int[],
+                        $13::date[],
                         $14::int[],
-                        $15::int[]
+                        $15::int[],
+                        $16::int[]
                     ) AS x(
                         codigo_sge,
                         cod_uo,
@@ -13755,6 +13800,7 @@ async def processar_data(request: Request, lote_id: int):
                         cnpj,
                         data_inicio,
                         data_fim,
+                        incompany,
                         data_ini_contratoapr,
                         data_fim_contratoapr,
                         vagas_total,
@@ -13778,6 +13824,7 @@ async def processar_data(request: Request, lote_id: int):
                     [v[12] for v in turmas_insert_buffer.values()],
                     [v[13] for v in turmas_insert_buffer.values()],
                     [v[14] for v in turmas_insert_buffer.values()],
+                    [v[15] for v in turmas_insert_buffer.values()],
                 )
 
                 for row in novas_turmas:
