@@ -1738,6 +1738,7 @@ async def processar_matriculas_realizadas(request: Request, lote_id: int):
                 AND s.status = 'RESOLVIDO'
                 AND s.cod_oferta_resolvido = rp.cod_oferta
                 AND s.ano = rp.ano
+                AND s.mes = rp.mes
             )
             """,
             lote_id
@@ -7974,8 +7975,9 @@ async def performance_cards(
     indicador: str,
     ano: int,
     meses: str | None = None,
-    subregioes: str | None = None,
     programas: str | None = None,
+    regiao: str | None = None,
+    subregioes: str | None = None,
     crs: str | None = None,
 ):
     pool = request.app.state.pool
@@ -8008,6 +8010,7 @@ async def performance_cards(
     filtro_sem_contrato_prog = ""
     filtro_stage_cr = ""
     filtro_real_cr = ""
+    filtro_regiao = ""
 
     if ids_sub:
         filtro_stage_sub = f" AND bs.subregiao_codigo = ANY(${idx}::int[])"
@@ -8042,6 +8045,11 @@ async def performance_cards(
         "hora_aluno": ("HORA ALUNO", "HORA-ALUNO", "HORA_ALUNO"),
         "receita": ("RECEITAS CORRENTES", "RECEITA", "RECEITAS"),
     }[indicador]
+
+    if regiao:
+        filtro_regiao = f"AND UPPER(TRIM(r.nome)) = UPPER(TRIM(${idx}::text))"
+        params.append(regiao)
+        idx += 1
 
     realizado_cte = ""
     sem_contrato_cte = ""
@@ -8194,12 +8202,22 @@ async def performance_cards(
         FROM planejamento_staging ps
         JOIN lote_planejamento lp
         ON lp.id = ps.lote_id
+
         JOIN programas_norm pn
         ON pn.nome_chave = UPPER(TRIM(COALESCE(ps.programa_raw::text, '')))
+
         JOIN subregioes_norm sn
         ON sn.nome_chave = UPPER(TRIM(COALESCE(ps.subregiao::text, '')))
+
+        JOIN subregioes s
+        ON s.codigo = sn.codigo_int
+
+        JOIN regioes r
+        ON r.codigo = s.codigo_regiao
+
         WHERE ps.flag_valida = TRUE
         AND UPPER(TRIM(COALESCE(ps.conta::text, ''))) IN {tuple(conta_filtro)}
+        {filtro_regiao}
         {filtro_stage_cr}
     ),
 
@@ -8340,6 +8358,18 @@ async def performance_filtros_subregioes(
         "receita": "COALESCE(rp.receita_real, 0)",
     }.get(indicador, "COALESCE(rp.matriculas_real, 0)")
 
+    meta_col = {
+        "matriculas": "COALESCE(mp.matriculas_meta, 0)",
+        "hora_aluno": "COALESCE(mp.ha_meta, 0)",
+        "receita": "COALESCE(mp.receita_meta, 0)",
+    }.get(indicador, "COALESCE(mp.matriculas_meta, 0)")
+
+    proj_col = {
+        "matriculas": "COALESCE(pp.matriculas_proj, 0)",
+        "hora_aluno": "COALESCE(pp.ha_proj, 0)",
+        "receita": "COALESCE(pp.receita_proj, 0)",
+    }.get(indicador, "COALESCE(pp.matriculas_proj, 0)")
+
     sql = f"""
     WITH programas_norm AS (
         SELECT
@@ -8352,48 +8382,60 @@ async def performance_filtros_subregioes(
         FROM programas
     ),
 
-    br AS (
-        SELECT DISTINCT
-            pn.programa_id_txt,
-            CAST(u.cod_subregiao AS integer) AS subregiao_codigo
+    dados AS (
+        SELECT
+            s.codigo AS subregiao_codigo,
+            UPPER(TRIM(s.nome)) AS nome,
+
+            COALESCE(SUM({meta_col}), 0) AS meta,
+            COALESCE(SUM({proj_col}), 0) AS projetado,
+            COALESCE(SUM({real_col}), 0) AS realizado
+
         FROM ofertas_programas o
+
         JOIN programas_norm pn
-          ON pn.codigo_txt = TRIM(COALESCE(o.cod_programa::text, ''))
+        ON pn.codigo_txt = TRIM(COALESCE(o.cod_programa::text, ''))
+
         JOIN uo u
-          ON u.codigo = o.cod_uo
+        ON u.codigo = o.cod_uo
+
+        JOIN subregioes s
+        ON s.codigo = CAST(u.cod_subregiao AS integer)
+
+        JOIN regioes r
+        ON r.codigo = s.codigo_regiao
+
+        LEFT JOIN meta_programas mp
+        ON mp.cod_oferta = o.codigo
+        AND mp.ano = $1
+        AND mp.mes = ANY($2::int[])
+
+        LEFT JOIN projetado_programas pp
+        ON pp.cod_oferta = o.codigo
+        AND pp.ano = $1
+        AND pp.mes = ANY($2::int[])
+
+        LEFT JOIN realizado_programas rp
+        ON rp.cod_oferta = o.codigo
+        AND rp.ano = $1
+        AND rp.mes = ANY($2::int[])
+
         WHERE CAST(o.ano AS integer) = $1
+        {filtro_regiao}
         {filtro_prog}
         {filtro_cr}
 
-    ),
-
-    realizado AS (
-        SELECT
-            br.subregiao_codigo,
-            COALESCE(SUM({real_col}), 0) AS realizado
-        FROM br
-        JOIN realizado_programas rp
-        ON rp.ano = $1
-        AND rp.mes = ANY($2::int[])
-        JOIN ofertas_programas o
-        ON o.codigo = rp.cod_oferta
-        AND CAST(o.cod_programa AS text) = br.programa_id_txt
-        JOIN uo u
-        ON u.codigo = o.cod_uo
-        AND CAST(u.cod_subregiao AS integer) = br.subregiao_codigo
-        GROUP BY br.subregiao_codigo
+        GROUP BY s.codigo, s.nome
     )
 
-    SELECT DISTINCT
-        s.codigo AS codigo,
-        UPPER(TRIM(s.nome)) AS nome
-    FROM subregioes s
-    JOIN regioes r
-      ON r.codigo = s.codigo_regiao
-    JOIN realizado re
-      ON re.subregiao_codigo = s.codigo
-    WHERE COALESCE(re.realizado, 0) > 0
-    {filtro_regiao}
+    SELECT
+        subregiao_codigo AS codigo,
+        nome
+    FROM dados
+    WHERE
+        COALESCE(meta, 0) > 0
+        OR COALESCE(projetado, 0) > 0
+        OR COALESCE(realizado, 0) > 0
     ORDER BY nome
     """
 
@@ -8453,6 +8495,18 @@ async def performance_filtros_regioes(
         "receita": "COALESCE(rp.receita_real, 0)",
     }.get(indicador, "COALESCE(rp.matriculas_real, 0)")
 
+    meta_col = {
+        "matriculas": "COALESCE(mp.matriculas_meta, 0)",
+        "hora_aluno": "COALESCE(mp.ha_meta, 0)",
+        "receita": "COALESCE(mp.receita_meta, 0)",
+    }.get(indicador, "COALESCE(mp.matriculas_meta, 0)")
+
+    proj_col = {
+        "matriculas": "COALESCE(pp.matriculas_proj, 0)",
+        "hora_aluno": "COALESCE(pp.ha_proj, 0)",
+        "receita": "COALESCE(pp.receita_proj, 0)",
+    }.get(indicador, "COALESCE(pp.matriculas_proj, 0)")
+
     sql = f"""
     WITH programas_norm AS (
         SELECT
@@ -8465,33 +8519,60 @@ async def performance_filtros_regioes(
         FROM programas
     ),
 
-    realizado AS (
+    dados AS (
         SELECT
             r.nome AS regiao,
+
+            COALESCE(SUM({meta_col}), 0) AS meta,
+
+            COALESCE(SUM({proj_col}), 0) AS projetado,
+
             COALESCE(SUM({real_col}), 0) AS realizado
-        FROM realizado_programas rp
-        JOIN ofertas_programas o
-          ON o.codigo = rp.cod_oferta
+
+        FROM ofertas_programas o
+
         JOIN programas_norm pn
-          ON pn.codigo_txt = TRIM(COALESCE(o.cod_programa::text, ''))
+        ON pn.codigo_txt = TRIM(COALESCE(o.cod_programa::text, ''))
+
         JOIN uo u
-          ON u.codigo = o.cod_uo
+        ON u.codigo = o.cod_uo
+
         JOIN subregioes s
-          ON s.codigo = CAST(u.cod_subregiao AS integer)
+        ON s.codigo = CAST(u.cod_subregiao AS integer)
+
         JOIN regioes r
-          ON r.codigo = s.codigo_regiao
-        WHERE rp.ano = $1
+        ON r.codigo = s.codigo_regiao
+
+        LEFT JOIN meta_programas mp
+        ON mp.cod_oferta = o.codigo
+        AND mp.ano = $1
+        AND mp.mes = ANY($2::int[])
+
+        LEFT JOIN projetado_programas pp
+        ON pp.cod_oferta = o.codigo
+        AND pp.ano = $1
+        AND pp.mes = ANY($2::int[])
+
+        LEFT JOIN realizado_programas rp
+        ON rp.cod_oferta = o.codigo
+        AND rp.ano = $1
         AND rp.mes = ANY($2::int[])
+
+        WHERE o.ano = $1
         {filtro_prog}
         {filtro_sub}
         {filtro_cr}
+
         GROUP BY r.nome
     )
 
     SELECT DISTINCT
         UPPER(TRIM(regiao)) AS regiao
-    FROM realizado
-    WHERE COALESCE(realizado, 0) > 0
+    FROM dados
+    WHERE
+        COALESCE(meta, 0) > 0
+        OR COALESCE(projetado, 0) > 0
+        OR COALESCE(realizado, 0) > 0
     ORDER BY regiao
     """
 
@@ -8564,35 +8645,71 @@ async def performance_filtros_programas(
         FROM programas
     ),
 
-    realizado AS (
+    dados AS (
         SELECT
             pn.programa_id_txt,
             pn.programa_nome,
+            COALESCE(SUM(
+                CASE
+                    WHEN '{indicador}' = 'matriculas' THEN COALESCE(mp.matriculas_meta, 0)
+                    WHEN '{indicador}' = 'hora_aluno' THEN COALESCE(mp.ha_meta, 0)
+                    WHEN '{indicador}' = 'receita' THEN COALESCE(mp.receita_meta, 0)
+                    ELSE 0
+                END
+            ), 0) AS meta,
+
+            COALESCE(SUM(
+                CASE
+                    WHEN '{indicador}' = 'matriculas' THEN COALESCE(pp.matriculas_proj, 0)
+                    WHEN '{indicador}' = 'hora_aluno' THEN COALESCE(pp.ha_proj, 0)
+                    WHEN '{indicador}' = 'receita' THEN COALESCE(pp.receita_proj, 0)
+                    ELSE 0
+                END
+            ), 0) AS projetado,
+
             COALESCE(SUM({real_col}), 0) AS realizado
-        FROM realizado_programas rp
-        JOIN ofertas_programas o
-          ON o.codigo = rp.cod_oferta
+
+        FROM ofertas_programas o
         JOIN programas_norm pn
-          ON pn.codigo_txt = TRIM(COALESCE(o.cod_programa::text, ''))
+        ON pn.codigo_txt = TRIM(COALESCE(o.cod_programa::text, ''))
         JOIN uo u
-          ON u.codigo = o.cod_uo
+        ON u.codigo = o.cod_uo
         JOIN subregioes s
-          ON s.codigo = CAST(u.cod_subregiao AS integer)
+        ON s.codigo = CAST(u.cod_subregiao AS integer)
         JOIN regioes r
-          ON r.codigo = s.codigo_regiao
-        WHERE rp.ano = $1
+        ON r.codigo = s.codigo_regiao
+
+        LEFT JOIN meta_programas mp
+        ON mp.cod_oferta = o.codigo
+        AND mp.ano = $1
+        AND mp.mes = ANY($2::int[])
+
+        LEFT JOIN projetado_programas pp
+        ON pp.cod_oferta = o.codigo
+        AND pp.ano = $1
+        AND pp.mes = ANY($2::int[])
+
+        LEFT JOIN realizado_programas rp
+        ON rp.cod_oferta = o.codigo
+        AND rp.ano = $1
         AND rp.mes = ANY($2::int[])
+
+        WHERE o.ano = $1
         {filtro_regiao}
         {filtro_sub}
         {filtro_cr}
+
         GROUP BY pn.programa_id_txt, pn.programa_nome
     )
 
     SELECT
         CAST(programa_id_txt AS integer) AS codigo,
         programa_nome AS nome
-    FROM realizado
-    WHERE COALESCE(realizado, 0) > 0
+    FROM dados
+    WHERE
+        COALESCE(meta, 0) > 0
+        OR COALESCE(projetado, 0) > 0
+        OR COALESCE(realizado, 0) > 0
     ORDER BY programa_nome
     """
 
@@ -15182,130 +15299,133 @@ async def performance_financiamento_resumo(
     ano: int,
     meses: str | None = None,
     programas: str | None = None,
+    regiao: str | None = None,
     subregioes: str | None = None,
     crs: str | None = None,
 ):
     pool = request.app.state.pool
 
-    meses_ids = [
-        int(x)
-        for x in (meses or "").split(",")
-        if x.strip().isdigit()
-    ]
-
+    meses_ids = [int(x) for x in (meses or "").split(",") if x.strip().isdigit()]
     if not meses_ids:
-        meses_ids = list(range(1,13))
+        meses_ids = list(range(1, 13))
 
-    programas_ids = [
-        int(x)
-        for x in (programas or "").split(",")
-        if x.strip().isdigit()
-    ]
+    programas_ids = [int(x) for x in (programas or "").split(",") if x.strip().isdigit()]
+    sub_ids = [int(x) for x in (subregioes or "").split(",") if x.strip().isdigit()]
+    cr_ids = [x.strip() for x in (crs or "").split(",") if x.strip()]
 
-    sub_ids = [
-        int(x)
-        for x in (subregioes or "").split(",")
-        if x.strip().isdigit()
-    ]
-
-    cr_ids = [
-        x.strip()
-        for x in (crs or "").split(",")
-        if x.strip()
-    ]
-
-    campo_valor = {
-        "matriculas": "rp.matriculas_real",
-        "hora_aluno": "rp.ha_real"
+    real_col = {
+        "matriculas": "COALESCE(rp.matriculas_real, 0)",
+        "hora_aluno": "COALESCE(rp.ha_real, 0)",
     }.get(indicador)
 
-    if not campo_valor:
+    meta_col = {
+        "matriculas": "COALESCE(mp.matriculas_meta, 0)",
+        "hora_aluno": "COALESCE(mp.ha_meta, 0)",
+    }.get(indicador)
+
+    proj_col = {
+        "matriculas": "COALESCE(pp.matriculas_proj, 0)",
+        "hora_aluno": "COALESCE(pp.ha_proj, 0)",
+    }.get(indicador)
+
+    if not real_col or not meta_col or not proj_col:
         return []
-
-    campo = f"SUM({campo_valor})"
-
-    if not campo:
-        return []
-
-    filtros = [
-        "rp.ano = $1",
-        "rp.mes = ANY($2::int[])"
-    ]
-
-    filtros.append(f"{campo_valor} > 0")
 
     params = [ano, meses_ids]
+    idx = 3
+
+    filtro_prog = ""
+    filtro_regiao = ""
+    filtro_sub = ""
+    filtro_cr = ""
 
     if programas_ids:
-        filtros.append(
-            f"o.cod_programa = ANY(${len(params)+1}::int[])"
-        )
+        filtro_prog = f"AND o.cod_programa = ANY(${idx}::int[])"
         params.append(programas_ids)
+        idx += 1
+
+    if regiao:
+        filtro_regiao = f"AND UPPER(TRIM(r.nome)) = UPPER(TRIM(${idx}::text))"
+        params.append(regiao)
+        idx += 1
 
     if sub_ids:
-        filtros.append(
-            f"CAST(u.cod_subregiao AS integer) = ANY(${len(params)+1}::int[])"
-        )
+        filtro_sub = f"AND CAST(u.cod_subregiao AS integer) = ANY(${idx}::int[])"
         params.append(sub_ids)
-    
-    if cr_ids:
-        filtros.append(
-            f"TRIM(COALESCE(o.cr::text, '')) = ANY(${len(params)+1}::text[])"
-        )
-        params.append(cr_ids)
+        idx += 1
 
-    where = " AND ".join(filtros)
+    if cr_ids:
+        filtro_cr = f"AND TRIM(COALESCE(o.cr::text, '')) = ANY(${idx}::text[])"
+        params.append(cr_ids)
+        idx += 1
 
     sql = f"""
-        SELECT
-            CASE
-                WHEN UPPER(TRIM(f.nome_financiamento))
-                    IN ('GRATUITO','GRATUIDADE NÃO REGIMENTAL')
-                THEN 'GRATUIDADE NÃO REGIMENTAL'
+    SELECT
+        CASE
+            WHEN UPPER(TRIM(f.nome_financiamento))
+                IN ('GRATUITO','GRATUIDADE NÃO REGIMENTAL')
+            THEN 'GRATUIDADE NÃO REGIMENTAL'
 
-                WHEN UPPER(TRIM(f.nome_financiamento))
-                    IN ('PAGO','PAGO POR PESSOA FÍSICA OU EMPRESA')
-                THEN 'PAGO POR PESSOA FÍSICA OU EMPRESA'
+            WHEN UPPER(TRIM(f.nome_financiamento))
+                IN ('PAGO','PAGO POR PESSOA FÍSICA OU EMPRESA')
+            THEN 'PAGO POR PESSOA FÍSICA OU EMPRESA'
 
-                ELSE UPPER(TRIM(f.nome_financiamento))
-            END AS financiamento,
+            ELSE UPPER(TRIM(f.nome_financiamento))
+        END AS financiamento,
 
-            COALESCE(
-                {campo},
-                0
-            ) AS realizado
+        COALESCE(SUM({meta_col}), 0) AS meta,
+        COALESCE(SUM({proj_col}), 0) AS projetado,
+        COALESCE(SUM({real_col}), 0) AS realizado
 
-        FROM realizado_programas rp
+    FROM ofertas_programas o
 
-        JOIN ofertas_programas o
-            ON o.codigo = rp.cod_oferta
+    JOIN uo u
+      ON u.codigo = o.cod_uo
 
-        JOIN uo u
-            ON u.codigo = o.cod_uo
+    JOIN subregioes s
+      ON s.codigo = CAST(u.cod_subregiao AS integer)
 
-        JOIN financiamento f
-            ON f.codigo = o.cod_financiamento
+    JOIN regioes r
+      ON r.codigo = s.codigo_regiao
 
-        WHERE {where}
+    JOIN financiamento f
+      ON f.codigo = o.cod_financiamento
 
-        GROUP BY financiamento
+    LEFT JOIN meta_programas mp
+      ON mp.cod_oferta = o.codigo
+     AND mp.ano = $1
+     AND mp.mes = ANY($2::int[])
 
-        HAVING
-            COALESCE({campo},0) > 0
+    LEFT JOIN projetado_programas pp
+      ON pp.cod_oferta = o.codigo
+     AND pp.ano = $1
+     AND pp.mes = ANY($2::int[])
 
-        ORDER BY realizado DESC
+    LEFT JOIN realizado_programas rp
+      ON rp.cod_oferta = o.codigo
+     AND rp.ano = $1
+     AND rp.mes = ANY($2::int[])
+
+    WHERE o.ano = $1
+    {filtro_prog}
+    {filtro_regiao}
+    {filtro_sub}
+    {filtro_cr}
+
+    GROUP BY financiamento
+
+    HAVING
+        COALESCE(SUM({meta_col}), 0) > 0
+        OR COALESCE(SUM({proj_col}), 0) > 0
+        OR COALESCE(SUM({real_col}), 0) > 0
+
+    ORDER BY realizado DESC, financiamento
     """
 
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            sql,
-            *params
-        )
+        rows = await conn.fetch(sql, *params)
 
-    return [
-        dict(r)
-        for r in rows
-    ]
+    return [dict(r) for r in rows]
 
 @router.get("/performance/filtros/crs")
 async def performance_filtros_crs(
