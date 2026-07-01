@@ -15360,65 +15360,49 @@ async def performance_financiamento_resumo(
         idx += 1
 
     sql = f"""
+    WITH ofertas_filtradas AS (
+        SELECT
+            o.codigo AS cod_oferta,
+            CASE
+                WHEN UPPER(TRIM(f.nome_financiamento))
+                    IN ('GRATUITO','GRATUIDADE NÃO REGIMENTAL')
+                THEN 'GRATUIDADE NÃO REGIMENTAL'
+
+                WHEN UPPER(TRIM(f.nome_financiamento))
+                    IN ('PAGO','PAGO POR PESSOA FÍSICA OU EMPRESA')
+                THEN 'PAGO POR PESSOA FÍSICA OU EMPRESA'
+
+                ELSE UPPER(TRIM(f.nome_financiamento))
+            END AS financiamento
+        FROM ofertas_programas o
+        JOIN uo u ON u.codigo = o.cod_uo
+        JOIN subregioes s ON s.codigo = CAST(u.cod_subregiao AS integer)
+        JOIN regioes r ON r.codigo = s.codigo_regiao
+        JOIN financiamento f ON f.codigo = o.cod_financiamento
+        WHERE o.ano = $1
+        {filtro_prog}
+        {filtro_regiao}
+        {filtro_sub}
+        {filtro_cr}
+    ),
+    real AS (
+        SELECT
+            ofi.financiamento,
+            SUM({real_col}) AS realizado
+        FROM ofertas_filtradas ofi
+        JOIN realizado_programas rp
+        ON rp.cod_oferta = ofi.cod_oferta
+        AND rp.ano = $1
+        AND rp.mes = ANY($2::int[])
+        GROUP BY ofi.financiamento
+    )
     SELECT
-        CASE
-            WHEN UPPER(TRIM(f.nome_financiamento))
-                IN ('GRATUITO','GRATUIDADE NÃO REGIMENTAL')
-            THEN 'GRATUIDADE NÃO REGIMENTAL'
-
-            WHEN UPPER(TRIM(f.nome_financiamento))
-                IN ('PAGO','PAGO POR PESSOA FÍSICA OU EMPRESA')
-            THEN 'PAGO POR PESSOA FÍSICA OU EMPRESA'
-
-            ELSE UPPER(TRIM(f.nome_financiamento))
-        END AS financiamento,
-
-        COALESCE(SUM({meta_col}), 0) AS meta,
-        COALESCE(SUM({proj_col}), 0) AS projetado,
-        COALESCE(SUM({real_col}), 0) AS realizado
-
-    FROM ofertas_programas o
-
-    JOIN uo u
-      ON u.codigo = o.cod_uo
-
-    JOIN subregioes s
-      ON s.codigo = CAST(u.cod_subregiao AS integer)
-
-    JOIN regioes r
-      ON r.codigo = s.codigo_regiao
-
-    JOIN financiamento f
-      ON f.codigo = o.cod_financiamento
-
-    LEFT JOIN meta_programas mp
-      ON mp.cod_oferta = o.codigo
-     AND mp.ano = $1
-     AND mp.mes = ANY($2::int[])
-
-    LEFT JOIN projetado_programas pp
-      ON pp.cod_oferta = o.codigo
-     AND pp.ano = $1
-     AND pp.mes = ANY($2::int[])
-
-    LEFT JOIN realizado_programas rp
-      ON rp.cod_oferta = o.codigo
-     AND rp.ano = $1
-     AND rp.mes = ANY($2::int[])
-
-    WHERE o.ano = $1
-    {filtro_prog}
-    {filtro_regiao}
-    {filtro_sub}
-    {filtro_cr}
-
-    GROUP BY financiamento
-
-    HAVING
-        COALESCE(SUM({meta_col}), 0) > 0
-        OR COALESCE(SUM({proj_col}), 0) > 0
-        OR COALESCE(SUM({real_col}), 0) > 0
-
+        financiamento,
+        0 AS meta,
+        0 AS projetado,
+        COALESCE(realizado, 0) AS realizado
+    FROM real
+    WHERE COALESCE(realizado, 0) > 0
     ORDER BY realizado DESC, financiamento
     """
 
