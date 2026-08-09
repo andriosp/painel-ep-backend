@@ -72,6 +72,668 @@ def _recomendacao_indicador(nome, realizado, meta):
 
     return f"Priorizar plano de ação para recuperação de {nome}, considerando o desempenho abaixo do esperado."
 
+def _pontuacao_indicador(realizado, meta):
+    """
+    Retorna a pontuação do indicador conforme o percentual
+    de atingimento da meta.
+
+    3 pontos: 100% ou mais
+    2 pontos: de 75% a 99,99%
+    1 ponto: de 51% a 74,99%
+    0 ponto: abaixo de 51%
+    None: indicador sem meta
+    """
+
+    realizado = float(realizado or 0)
+    meta = float(meta or 0)
+
+    if meta <= 0:
+        return None
+
+    percentual = (realizado / meta) * 100
+
+    if percentual >= 100:
+        return 3
+
+    if percentual >= 75:
+        return 2
+
+    if percentual >= 51:
+        return 1
+
+    return 0
+
+
+def _classificar_score_unidade(
+    score,
+    score_maximo
+):
+    """
+    Classifica o desempenho da unidade proporcionalmente
+    ao total máximo de pontos possível.
+    """
+
+    score = float(score or 0)
+    score_maximo = float(score_maximo or 0)
+
+    if score_maximo <= 0:
+        return {
+            "classificacao": "Sem classificação",
+            "nivel": "sem_dados",
+            "percentual_score": 0
+        }
+
+    percentual_score = (
+        score / score_maximo
+    ) * 100
+
+    if percentual_score >= 85:
+        classificacao = (
+            "Desempenho de Excelência"
+        )
+        nivel = "excelencia"
+
+    elif percentual_score >= 65:
+        classificacao = (
+            "Desempenho Satisfatório"
+        )
+        nivel = "satisfatorio"
+
+    elif percentual_score >= 40:
+        classificacao = (
+            "Desempenho Regular"
+        )
+        nivel = "regular"
+
+    else:
+        classificacao = (
+            "Desempenho Crítico"
+        )
+        nivel = "critico"
+
+    return {
+        "classificacao": classificacao,
+        "nivel": nivel,
+        "percentual_score": percentual_score
+    }
+
+
+def _analisar_indicador_modalidade(
+    modalidade,
+    realizado,
+    meta,
+    indicador
+):
+    """
+    Analisa um indicador de determinada modalidade e gera
+    sua interpretação textual.
+    """
+
+    modalidade = (
+        str(modalidade).strip()
+        if modalidade
+        else "Modalidade não informada"
+    )
+
+    realizado = float(realizado or 0)
+    meta = float(meta or 0)
+
+    nomes_indicadores = {
+        "matriculas": "matrículas",
+        "hora_aluno": "hora-aluno",
+        "receita": "receita"
+    }
+
+    nome_indicador = nomes_indicadores.get(
+        indicador,
+        indicador
+    )
+
+    # ======================================================
+    # SEM META E SEM EXECUÇÃO
+    # ======================================================
+
+    if meta <= 0 and realizado <= 0:
+        return {
+            "modalidade": modalidade,
+            "indicador": indicador,
+            "realizado": realizado,
+            "meta": meta,
+            "atingimento": None,
+            "pontuacao": None,
+            "status": "sem_dados",
+            "texto": (
+                f"Na modalidade {modalidade}, o indicador de "
+                f"{nome_indicador} não possui meta nem execução "
+                f"registrada no período analisado."
+            )
+        }
+
+    # ======================================================
+    # EXECUÇÃO SEM META
+    # ======================================================
+
+    if meta <= 0 and realizado > 0:
+        return {
+            "modalidade": modalidade,
+            "indicador": indicador,
+            "realizado": realizado,
+            "meta": meta,
+            "atingimento": None,
+            "pontuacao": None,
+            "status": "sem_meta",
+            "texto": (
+                f"Na modalidade {modalidade}, houve execução de "
+                f"{nome_indicador}, porém não existe meta definida "
+                f"para comparação."
+            )
+        }
+
+    atingimento = (
+        realizado / meta
+    ) * 100
+
+    pontuacao = _pontuacao_indicador(
+        realizado,
+        meta
+    )
+
+    # ======================================================
+    # META ATINGIDA
+    # ======================================================
+
+    if atingimento >= 100:
+        status = "meta_atingida"
+
+        if indicador == "matriculas":
+            texto = (
+                f"A modalidade {modalidade} atingiu "
+                f"{atingimento:.1f}% da meta de matrículas, "
+                f"demonstrando desempenho superior ao planejado."
+            )
+
+        elif indicador == "hora_aluno":
+            texto = (
+                f"A modalidade {modalidade} atingiu "
+                f"{atingimento:.1f}% da meta de hora-aluno, "
+                f"evidenciando execução da carga horária acima "
+                f"do planejamento."
+            )
+
+        elif indicador == "receita":
+            texto = (
+                f"A modalidade {modalidade} atingiu "
+                f"{atingimento:.1f}% da meta de receita, "
+                f"apresentando resultado financeiro superior "
+                f"ao planejado."
+            )
+
+        else:
+            texto = (
+                f"A modalidade {modalidade} atingiu "
+                f"{atingimento:.1f}% da meta de "
+                f"{nome_indicador}."
+            )
+
+    # ======================================================
+    # PRÓXIMO DA META
+    # ======================================================
+
+    elif atingimento >= 75:
+        status = "no_caminho"
+
+        if indicador == "matriculas":
+            texto = (
+                f"A modalidade {modalidade} alcançou "
+                f"{atingimento:.1f}% da meta de matrículas e "
+                f"encontra-se próxima do resultado planejado."
+            )
+
+        elif indicador == "hora_aluno":
+            texto = (
+                f"A modalidade {modalidade} alcançou "
+                f"{atingimento:.1f}% da meta de hora-aluno, "
+                f"mantendo desempenho próximo do esperado."
+            )
+
+        elif indicador == "receita":
+            texto = (
+                f"A modalidade {modalidade} alcançou "
+                f"{atingimento:.1f}% da meta de receita, "
+                f"permanecendo em faixa de acompanhamento."
+            )
+
+        else:
+            texto = (
+                f"A modalidade {modalidade} alcançou "
+                f"{atingimento:.1f}% da meta de "
+                f"{nome_indicador}."
+            )
+
+    # ======================================================
+    # ATENÇÃO
+    # ======================================================
+
+    elif atingimento >= 51:
+        status = "atencao"
+
+        if indicador == "matriculas":
+            texto = (
+                f"A modalidade {modalidade} alcançou somente "
+                f"{atingimento:.1f}% da meta de matrículas, "
+                f"indicando necessidade de reforço nas ações "
+                f"de captação e conversão."
+            )
+
+        elif indicador == "hora_aluno":
+            texto = (
+                f"A modalidade {modalidade} alcançou "
+                f"{atingimento:.1f}% da meta de hora-aluno, "
+                f"exigindo acompanhamento da execução das "
+                f"turmas e cargas horárias."
+            )
+
+        elif indicador == "receita":
+            texto = (
+                f"A modalidade {modalidade} alcançou "
+                f"{atingimento:.1f}% da meta de receita, "
+                f"indicando atenção ao desempenho financeiro."
+            )
+
+        else:
+            texto = (
+                f"A modalidade {modalidade} alcançou "
+                f"{atingimento:.1f}% da meta de "
+                f"{nome_indicador}."
+            )
+
+    # ======================================================
+    # CRÍTICO
+    # ======================================================
+
+    else:
+        status = "critico"
+
+        if indicador == "matriculas":
+            texto = (
+                f"A modalidade {modalidade} atingiu apenas "
+                f"{atingimento:.1f}% da meta de matrículas, "
+                f"configurando desempenho crítico e demandando "
+                f"ações prioritárias de recuperação."
+            )
+
+        elif indicador == "hora_aluno":
+            texto = (
+                f"A modalidade {modalidade} atingiu apenas "
+                f"{atingimento:.1f}% da meta de hora-aluno, "
+                f"indicando baixa execução da carga horária "
+                f"planejada."
+            )
+
+        elif indicador == "receita" and realizado <= 0:
+            texto = (
+                f"A modalidade {modalidade} possui meta de "
+                f"receita definida, mas não apresentou execução "
+                f"financeira no período, configurando situação "
+                f"crítica."
+            )
+
+        elif indicador == "receita":
+            texto = (
+                f"A modalidade {modalidade} atingiu apenas "
+                f"{atingimento:.1f}% da meta de receita, "
+                f"configurando desempenho financeiro crítico."
+            )
+
+        else:
+            texto = (
+                f"A modalidade {modalidade} atingiu apenas "
+                f"{atingimento:.1f}% da meta de "
+                f"{nome_indicador}."
+            )
+
+    return {
+        "modalidade": modalidade,
+        "indicador": indicador,
+        "realizado": realizado,
+        "meta": meta,
+        "atingimento": atingimento,
+        "pontuacao": pontuacao,
+        "status": status,
+        "texto": texto
+    }
+
+
+def _gerar_analise_unidade(
+    nome_uo,
+    programa,
+    matriculas,
+    hora_aluno,
+    receita
+):
+    """
+    Consolida a análise da Unidade Operacional, calcula o
+    score e gera resumo executivo e conclusão automática.
+    """
+
+    nome_uo = (
+        str(nome_uo).strip()
+        if nome_uo
+        else "Unidade operacional não informada"
+    )
+
+    programa = (
+        str(programa).strip()
+        if programa
+        else "programa não informado"
+    )
+
+    matriculas = matriculas or []
+    hora_aluno = hora_aluno or []
+    receita = receita or []
+
+    # ======================================================
+    # MODALIDADES
+    # ======================================================
+
+    modalidades = set()
+
+    for grupo in (
+        matriculas,
+        hora_aluno,
+        receita
+    ):
+        for item in grupo:
+            modalidade = (
+                item.get("modalidade")
+                or "Não informada"
+            )
+
+            modalidades.add(
+                str(modalidade).strip()
+            )
+
+    qtd_modalidades = len(modalidades)
+
+    # ======================================================
+    # ANÁLISES DOS INDICADORES
+    # ======================================================
+
+    analises_matriculas = [
+        _analisar_indicador_modalidade(
+            modalidade=item.get("modalidade"),
+            realizado=item.get(
+                "realizado_periodo",
+                0
+            ),
+            meta=item.get(
+                "meta_periodo",
+                0
+            ),
+            indicador="matriculas"
+        )
+        for item in matriculas
+    ]
+
+    analises_hora_aluno = [
+        _analisar_indicador_modalidade(
+            modalidade=item.get("modalidade"),
+            realizado=item.get(
+                "realizado_periodo",
+                0
+            ),
+            meta=item.get(
+                "meta_periodo",
+                0
+            ),
+            indicador="hora_aluno"
+        )
+        for item in hora_aluno
+    ]
+
+    analises_receita = [
+        _analisar_indicador_modalidade(
+            modalidade=item.get("modalidade"),
+            realizado=item.get(
+                "realizado_periodo",
+                0
+            ),
+            meta=item.get(
+                "meta_periodo",
+                0
+            ),
+            indicador="receita"
+        )
+        for item in receita
+    ]
+
+    todas_analises = (
+        analises_matriculas
+        + analises_hora_aluno
+        + analises_receita
+    )
+
+    # ======================================================
+    # SCORE
+    # ======================================================
+
+    pontuacoes_validas = [
+        item["pontuacao"]
+        for item in todas_analises
+        if item.get("pontuacao") is not None
+    ]
+
+    score = sum(pontuacoes_validas)
+    score_maximo = len(
+        pontuacoes_validas
+    ) * 3
+
+    classificacao = _classificar_score_unidade(
+        score,
+        score_maximo
+    )
+
+    # ======================================================
+    # CONTAGEM DOS STATUS
+    # ======================================================
+
+    resumo_status = {
+        "meta_atingida": 0,
+        "no_caminho": 0,
+        "atencao": 0,
+        "critico": 0,
+        "sem_meta": 0,
+        "sem_dados": 0
+    }
+
+    for item in todas_analises:
+        status = item.get("status")
+
+        if status in resumo_status:
+            resumo_status[status] += 1
+
+    # ======================================================
+    # MÉDIAS DE ATINGIMENTO
+    # ======================================================
+
+    def calcular_media(itens):
+        valores = [
+            float(item["atingimento"])
+            for item in itens
+            if item.get("atingimento") is not None
+        ]
+
+        if not valores:
+            return None
+
+        return sum(valores) / len(valores)
+
+    media_matriculas = calcular_media(
+        analises_matriculas
+    )
+
+    media_hora_aluno = calcular_media(
+        analises_hora_aluno
+    )
+
+    media_receita = calcular_media(
+        analises_receita
+    )
+
+    # ======================================================
+    # RESUMO EXECUTIVO
+    # ======================================================
+
+    resumo_executivo = (
+        f"No período analisado, a unidade {nome_uo} apresentou "
+        f"resultados em {qtd_modalidades} modalidade"
+        f"{'s' if qtd_modalidades != 1 else ''} do programa "
+        f"{programa}. A avaliação considera o desempenho de "
+        f"matrículas, hora-aluno e receita em relação às metas "
+        f"estabelecidas para o período."
+    )
+
+    # ======================================================
+    # CONCLUSÃO
+    # ======================================================
+
+    nivel = classificacao["nivel"]
+
+    if nivel == "excelencia":
+        conclusao = (
+            "A unidade apresentou desempenho de excelência, "
+            "com elevada aderência às metas estabelecidas."
+        )
+
+    elif nivel == "satisfatorio":
+        conclusao = (
+            "A unidade apresentou desempenho satisfatório, "
+            "com parte significativa dos indicadores próxima "
+            "ou acima das metas estabelecidas."
+        )
+
+    elif nivel == "regular":
+        conclusao = (
+            "A unidade apresentou desempenho regular, com "
+            "resultados heterogêneos e necessidade de "
+            "acompanhamento dos indicadores abaixo da meta."
+        )
+
+    elif nivel == "critico":
+        conclusao = (
+            "A unidade apresentou desempenho crítico, com "
+            "indicadores relevantes abaixo das metas. "
+            "Recomenda-se priorizar ações corretivas."
+        )
+
+    else:
+        conclusao = (
+            "Não foi possível estabelecer uma classificação "
+            "completa devido à ausência de metas suficientes."
+        )
+
+    complementos = []
+
+    if resumo_status["meta_atingida"] > 0:
+        quantidade = resumo_status[
+            "meta_atingida"
+        ]
+
+        complementos.append(
+            f"{quantidade} indicador"
+            f"{'es atingiram' if quantidade != 1 else ' atingiu'} "
+            f"ou superaram as metas."
+        )
+
+    if resumo_status["critico"] > 0:
+        quantidade = resumo_status["critico"]
+
+        complementos.append(
+            f"{quantidade} indicador"
+            f"{'es demandam' if quantidade != 1 else ' demanda'} "
+            f"acompanhamento prioritário."
+        )
+
+    elif resumo_status["atencao"] > 0:
+        quantidade = resumo_status["atencao"]
+
+        complementos.append(
+            f"{quantidade} indicador"
+            f"{'es permanecem' if quantidade != 1 else ' permanece'} "
+            f"em nível de atenção."
+        )
+
+    if (
+        media_matriculas is not None
+        and media_receita is not None
+        and media_matriculas >= 75
+        and media_receita < 51
+    ):
+        complementos.append(
+            "Embora as matrículas apresentem desempenho "
+            "operacional relevante, a receita permanece em "
+            "nível crítico, indicando possível desalinhamento "
+            "entre execução educacional e financeira."
+        )
+
+    if (
+        media_matriculas is not None
+        and media_hora_aluno is not None
+        and abs(
+            media_matriculas
+            - media_hora_aluno
+        ) >= 30
+    ):
+        complementos.append(
+            "Há diferença relevante entre matrículas e "
+            "hora-aluno, recomendando-se verificar o andamento "
+            "das turmas e a execução das cargas horárias."
+        )
+
+    if complementos:
+        conclusao += " " + " ".join(
+            complementos[:4]
+        )
+
+    # ======================================================
+    # RETORNO
+    # ======================================================
+
+    return {
+        "uo": nome_uo,
+        "programa": programa,
+        "qtd_modalidades": qtd_modalidades,
+
+        "resumo_executivo": resumo_executivo,
+
+        "matriculas": analises_matriculas,
+        "hora_aluno": analises_hora_aluno,
+        "receita": analises_receita,
+
+        "score": score,
+        "score_maximo": score_maximo,
+
+        "percentual_score": classificacao[
+            "percentual_score"
+        ],
+
+        "classificacao": classificacao[
+            "classificacao"
+        ],
+
+        "nivel": classificacao["nivel"],
+
+        "resumo_status": resumo_status,
+
+        "medias_atingimento": {
+            "matriculas": media_matriculas,
+            "hora_aluno": media_hora_aluno,
+            "receita": media_receita
+        },
+
+        "conclusao": conclusao
+    }
+
 async def montar_preview_relatorio_executivo(conn, filtros, opcoes):
     meses = filtros.meses or list(range(1, 13))
 
@@ -344,176 +1006,151 @@ async def montar_preview_relatorio_executivo(conn, filtros, opcoes):
 
     turmas_total = int(row["total_turmas"] or 0)
 
-    sql_debug_turmas = f"""
+    sql_evolucao = f"""
         WITH ofertas_base AS (
             SELECT DISTINCT
-                o.codigo,
-                o.cod_programa,
-                o.cod_uo
+                o.codigo
             FROM ofertas_programas o
             WHERE {where_oferta}
-            AND ${idx_mes}::int[] IS NOT NULL
+        ),
+
+        ultimo_lote_planejamento AS (
+            SELECT MAX(ps.lote_id) AS lote_id
+            FROM planejamento_staging ps
+            JOIN planejamento_import_lotes pil
+                ON pil.id = ps.lote_id
+            WHERE ps.flag_valida IS DISTINCT FROM FALSE
+            AND ps.tipo = 'META'
+            AND CAST(pil.ano_referencia AS integer) = $1
+        ),
+
+        realizado_mes AS (
+            SELECT
+                rp.mes,
+                COALESCE(SUM(rp.matriculas_real), 0) AS matriculas_real,
+                COALESCE(SUM(rp.ha_real), 0) AS ha_real,
+                COALESCE(SUM(rp.receita_real), 0) AS receita_real
+            FROM realizado_programas rp
+            JOIN ofertas_base ob
+                ON ob.codigo = rp.cod_oferta
+            WHERE rp.ano = $1
+            AND rp.mes = ANY($2::int[])
+            GROUP BY rp.mes
+        ),
+
+        meta_mes AS (
+            SELECT
+                m.mes,
+
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN UPPER(TRIM(ps.conta)) = 'MATRÍCULAS' THEN
+                                CASE m.mes
+                                    WHEN 1 THEN COALESCE(ps.jan, 0)
+                                    WHEN 2 THEN COALESCE(ps.fev, 0)
+                                    WHEN 3 THEN COALESCE(ps.mar, 0)
+                                    WHEN 4 THEN COALESCE(ps.abr, 0)
+                                    WHEN 5 THEN COALESCE(ps.mai, 0)
+                                    WHEN 6 THEN COALESCE(ps.jun, 0)
+                                    WHEN 7 THEN COALESCE(ps.jul, 0)
+                                    WHEN 8 THEN COALESCE(ps.ago, 0)
+                                    WHEN 9 THEN COALESCE(ps.set_, 0)
+                                    WHEN 10 THEN COALESCE(ps.out_, 0)
+                                    WHEN 11 THEN COALESCE(ps.nov, 0)
+                                    WHEN 12 THEN COALESCE(ps.dez, 0)
+                                    ELSE 0
+                                END
+                            ELSE 0
+                        END
+                    ),
+                    0
+                ) AS matriculas_meta,
+
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN UPPER(TRIM(ps.conta)) = 'HORA-ALUNO' THEN
+                                CASE m.mes
+                                    WHEN 1 THEN COALESCE(ps.jan, 0)
+                                    WHEN 2 THEN COALESCE(ps.fev, 0)
+                                    WHEN 3 THEN COALESCE(ps.mar, 0)
+                                    WHEN 4 THEN COALESCE(ps.abr, 0)
+                                    WHEN 5 THEN COALESCE(ps.mai, 0)
+                                    WHEN 6 THEN COALESCE(ps.jun, 0)
+                                    WHEN 7 THEN COALESCE(ps.jul, 0)
+                                    WHEN 8 THEN COALESCE(ps.ago, 0)
+                                    WHEN 9 THEN COALESCE(ps.set_, 0)
+                                    WHEN 10 THEN COALESCE(ps.out_, 0)
+                                    WHEN 11 THEN COALESCE(ps.nov, 0)
+                                    WHEN 12 THEN COALESCE(ps.dez, 0)
+                                    ELSE 0
+                                END
+                            ELSE 0
+                        END
+                    ),
+                    0
+                ) AS ha_meta,
+
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN UPPER(TRIM(ps.conta)) = 'RECEITAS CORRENTES' THEN
+                                CASE m.mes
+                                    WHEN 1 THEN COALESCE(ps.jan, 0)
+                                    WHEN 2 THEN COALESCE(ps.fev, 0)
+                                    WHEN 3 THEN COALESCE(ps.mar, 0)
+                                    WHEN 4 THEN COALESCE(ps.abr, 0)
+                                    WHEN 5 THEN COALESCE(ps.mai, 0)
+                                    WHEN 6 THEN COALESCE(ps.jun, 0)
+                                    WHEN 7 THEN COALESCE(ps.jul, 0)
+                                    WHEN 8 THEN COALESCE(ps.ago, 0)
+                                    WHEN 9 THEN COALESCE(ps.set_, 0)
+                                    WHEN 10 THEN COALESCE(ps.out_, 0)
+                                    WHEN 11 THEN COALESCE(ps.nov, 0)
+                                    WHEN 12 THEN COALESCE(ps.dez, 0)
+                                    ELSE 0
+                                END
+                            ELSE 0
+                        END
+                    ),
+                    0
+                ) AS receita_meta
+
+            FROM generate_series(1, 12) m(mes)
+
+            CROSS JOIN planejamento_staging ps
+
+            JOIN ultimo_lote_planejamento ul
+                ON ul.lote_id = ps.lote_id
+
+            WHERE {where_planejamento}
+            AND m.mes = ANY($2::int[])
+
+            GROUP BY m.mes
         )
 
-        SELECT
-            t.codigo_sge,
-            t.cod_programa,
-            t.cod_uo,
-            t.data_inicio,
-            t.data_ini_contratoapr,
-            t.ano_referencia
-        FROM turmas t
-        JOIN ofertas_base ob
-            ON ob.cod_programa = t.cod_programa
-        AND ob.cod_uo = t.cod_uo
-        WHERE t.ano_referencia = $1
-        ORDER BY
-            t.data_inicio NULLS LAST,
-            t.data_ini_contratoapr NULLS LAST
-    """
-
-    debug_turmas = await conn.fetch(sql_debug_turmas, *params)
-
-    print("\nDEBUG TURMAS")
-    print("TOTAL TURMAS ENCONTRADAS SEM FILTRO DE DATA:", len(debug_turmas))
-
-    for t in debug_turmas:
-        print(
-            t["codigo_sge"],
-            "cod_programa:", t["cod_programa"],
-            "cod_uo:", t["cod_uo"],
-            "data_inicio:", t["data_inicio"],
-            "data_ini_contratoapr:", t["data_ini_contratoapr"],
-            "ano:", t["ano_referencia"],
-        )
-
-    sql_evolucao = f"""
-    WITH ofertas_base AS (
-        SELECT DISTINCT
-            o.codigo
-        FROM ofertas_programas o
-        WHERE {where_oferta}
-            AND $2::int[] IS NOT NULL
-    ),
-
-    realizado_mes AS (
-        SELECT
-            rp.mes,
-            COALESCE(SUM(rp.matriculas_real), 0) AS matriculas_real,
-            COALESCE(SUM(rp.ha_real), 0) AS ha_real,
-            COALESCE(SUM(rp.receita_real), 0) AS receita_real
-        FROM realizado_programas rp
-        JOIN ofertas_base ob
-            ON ob.codigo = rp.cod_oferta
-        WHERE rp.ano = $1
-        GROUP BY rp.mes
-    ),
-
-    meta_mes AS (
         SELECT
             m.mes,
 
-            COALESCE(
-                SUM(
-                    CASE
-                        WHEN UPPER(TRIM(ps.conta)) = 'MATRÍCULAS' THEN
-                            CASE m.mes
-                                WHEN 1 THEN COALESCE(ps.jan, 0)
-                                WHEN 2 THEN COALESCE(ps.fev, 0)
-                                WHEN 3 THEN COALESCE(ps.mar, 0)
-                                WHEN 4 THEN COALESCE(ps.abr, 0)
-                                WHEN 5 THEN COALESCE(ps.mai, 0)
-                                WHEN 6 THEN COALESCE(ps.jun, 0)
-                                WHEN 7 THEN COALESCE(ps.jul, 0)
-                                WHEN 8 THEN COALESCE(ps.ago, 0)
-                                WHEN 9 THEN COALESCE(ps.set_, 0)
-                                WHEN 10 THEN COALESCE(ps.out_, 0)
-                                WHEN 11 THEN COALESCE(ps.nov, 0)
-                                WHEN 12 THEN COALESCE(ps.dez, 0)
-                                ELSE 0
-                            END
-                        ELSE 0
-                    END
-                ),
-                0
-            ) AS matriculas_meta,
+            COALESCE(rm.matriculas_real, 0) AS matriculas_real,
+            COALESCE(mm.matriculas_meta, 0) AS matriculas_meta,
 
-            COALESCE(
-                SUM(
-                    CASE
-                        WHEN UPPER(TRIM(ps.conta)) = 'HORA-ALUNO' THEN
-                            CASE m.mes
-                                WHEN 1 THEN COALESCE(ps.jan, 0)
-                                WHEN 2 THEN COALESCE(ps.fev, 0)
-                                WHEN 3 THEN COALESCE(ps.mar, 0)
-                                WHEN 4 THEN COALESCE(ps.abr, 0)
-                                WHEN 5 THEN COALESCE(ps.mai, 0)
-                                WHEN 6 THEN COALESCE(ps.jun, 0)
-                                WHEN 7 THEN COALESCE(ps.jul, 0)
-                                WHEN 8 THEN COALESCE(ps.ago, 0)
-                                WHEN 9 THEN COALESCE(ps.set_, 0)
-                                WHEN 10 THEN COALESCE(ps.out_, 0)
-                                WHEN 11 THEN COALESCE(ps.nov, 0)
-                                WHEN 12 THEN COALESCE(ps.dez, 0)
-                                ELSE 0
-                            END
-                        ELSE 0
-                    END
-                ),
-                0
-            ) AS ha_meta,
+            COALESCE(rm.ha_real, 0) AS ha_real,
+            COALESCE(mm.ha_meta, 0) AS ha_meta,
 
-            COALESCE(
-                SUM(
-                    CASE
-                        WHEN UPPER(TRIM(ps.conta)) = 'RECEITAS CORRENTES' THEN
-                            CASE m.mes
-                                WHEN 1 THEN COALESCE(ps.jan, 0)
-                                WHEN 2 THEN COALESCE(ps.fev, 0)
-                                WHEN 3 THEN COALESCE(ps.mar, 0)
-                                WHEN 4 THEN COALESCE(ps.abr, 0)
-                                WHEN 5 THEN COALESCE(ps.mai, 0)
-                                WHEN 6 THEN COALESCE(ps.jun, 0)
-                                WHEN 7 THEN COALESCE(ps.jul, 0)
-                                WHEN 8 THEN COALESCE(ps.ago, 0)
-                                WHEN 9 THEN COALESCE(ps.set_, 0)
-                                WHEN 10 THEN COALESCE(ps.out_, 0)
-                                WHEN 11 THEN COALESCE(ps.nov, 0)
-                                WHEN 12 THEN COALESCE(ps.dez, 0)
-                                ELSE 0
-                            END
-                        ELSE 0
-                    END
-                ),
-                0
-            ) AS receita_meta
+            COALESCE(rm.receita_real, 0) AS receita_real,
+            COALESCE(mm.receita_meta, 0) AS receita_meta
 
         FROM generate_series(1, 12) m(mes)
-        CROSS JOIN planejamento_staging ps
 
-        WHERE {where_planejamento}
+        LEFT JOIN realizado_mes rm
+            ON rm.mes = m.mes
 
-        GROUP BY m.mes
-    )
+        LEFT JOIN meta_mes mm
+            ON mm.mes = m.mes
 
-    SELECT
-        m.mes,
-
-        COALESCE(rm.matriculas_real, 0) AS matriculas_real,
-        COALESCE(mm.matriculas_meta, 0) AS matriculas_meta,
-
-        COALESCE(rm.ha_real, 0) AS ha_real,
-        COALESCE(mm.ha_meta, 0) AS ha_meta,
-
-        COALESCE(rm.receita_real, 0) AS receita_real,
-        COALESCE(mm.receita_meta, 0) AS receita_meta
-
-    FROM generate_series(1, 12) m(mes)
-    LEFT JOIN realizado_mes rm
-        ON rm.mes = m.mes
-    LEFT JOIN meta_mes mm
-        ON mm.mes = m.mes
-    ORDER BY m.mes
+        ORDER BY m.mes
     """
 
     evolucao_rows = await conn.fetch(
@@ -540,26 +1177,36 @@ async def montar_preview_relatorio_executivo(conn, filtros, opcoes):
 
     for row_evo in evolucao_rows:
         mes = int(row_evo["mes"])
+        mes_selecionado = mes in meses_selecionados
 
         evolucao_mensal["matriculas"]["realizado"].append(
-            float(row_evo["matriculas_real"] or 0) if mes in meses_selecionados else None
+            float(row_evo["matriculas_real"] or 0)
+            if mes_selecionado else None
         )
+
         evolucao_mensal["matriculas"]["meta"].append(
             float(row_evo["matriculas_meta"] or 0)
+            if mes_selecionado else None
         )
 
         evolucao_mensal["hora_aluno"]["realizado"].append(
-            float(row_evo["ha_real"] or 0) if mes in meses_selecionados else None
+            float(row_evo["ha_real"] or 0)
+            if mes_selecionado else None
         )
+
         evolucao_mensal["hora_aluno"]["meta"].append(
             float(row_evo["ha_meta"] or 0)
+            if mes_selecionado else None
         )
 
         evolucao_mensal["receita"]["realizado"].append(
-            float(row_evo["receita_real"] or 0) if mes in meses_selecionados else None
+            float(row_evo["receita_real"] or 0)
+            if mes_selecionado else None
         )
+
         evolucao_mensal["receita"]["meta"].append(
             float(row_evo["receita_meta"] or 0)
+            if mes_selecionado else None
         )
 
     sql_regioes = f"""
@@ -668,17 +1315,6 @@ async def montar_preview_relatorio_executivo(conn, filtros, opcoes):
 
     desempenho_regioes = []
 
-    print("DEBUG REGIÕES")
-    print("Programa:", filtros.programa)
-    print("Região:", filtros.regiao)
-
-    for r in regioes_rows:
-        print(
-            r["regiao"],
-            r["matriculas_real"],
-            r["matriculas_meta"]
-        )
-
     sql_subregioes = f"""
     WITH ofertas_base AS (
         SELECT DISTINCT
@@ -784,24 +1420,6 @@ async def montar_preview_relatorio_executivo(conn, filtros, opcoes):
     """
 
     subregioes_rows = await conn.fetch(sql_subregioes, *params)
-
-    print("DEBUG SUBREGIÕES")
-    for r in subregioes_rows:
-        print(
-            r["subregiao"],
-            "MAT:",
-            r["matriculas_real"],
-            "/",
-            r["matriculas_meta"],
-            "HA:",
-            r["ha_real"],
-            "/",
-            r["ha_meta"],
-            "REC:",
-            r["receita_real"],
-            "/",
-            r["receita_meta"],
-        )
 
     desempenho_subregioes = []
 
@@ -918,61 +1536,7 @@ async def montar_preview_relatorio_executivo(conn, filtros, opcoes):
     ORDER BY bm.modalidade
     """
 
-    print("\n========================")
-    print("DEBUG SQL MODALIDADES")
-    print("========================")
-    print("WHERE_OFERTA:", where_oferta)
-    print("WHERE_PLANEJAMENTO:", where_planejamento)
-    print("PARAMS:", params)
-
-    sql_debug_ofertas = f"""
-        SELECT
-            COUNT(*) AS total_ofertas
-        FROM ofertas_programas o
-        WHERE {where_oferta}
-        AND ${idx_mes}::int[] IS NOT NULL
-    """
-
-    debug_ofertas = await conn.fetchrow(sql_debug_ofertas, *params)
-
-    print("TOTAL OFERTAS_BASE:", debug_ofertas["total_ofertas"])
-
     modalidades_rows = await conn.fetch(sql_modalidades, *params)
-
-    print("\nDEBUG MODALIDADES")
-
-    for r in modalidades_rows:
-        print(
-            r["modalidade"],
-            "MAT:",
-            r["matriculas_real"],
-            "/",
-            r["matriculas_meta"]
-        )
-
-    print("TOTAL MODALIDADES:", len(modalidades_rows))
-
-
-    for r in modalidades_rows:
-        print(
-            r["modalidade"],
-            "MAT:",
-            r["matriculas_real"],
-            "/",
-            r["matriculas_meta"]
-        )
-
-    print("TOTAL MODALIDADES:", len(modalidades_rows))
-
-
-    for r in modalidades_rows:
-        print(
-            r["modalidade"],
-            "MAT:",
-            r["matriculas_real"],
-            "/",
-            r["matriculas_meta"]
-        )
 
     desempenho_modalidades = []
 
@@ -1418,10 +1982,6 @@ async def montar_preview_relatorio_executivo(conn, filtros, opcoes):
                 regiao_uo
             )
 
-            print("\nDEBUG REGIAO UO")
-            print("REGIAO_UO:", regiao_uo)
-            print("ROW_REG_CTX:", row_reg_ctx)
-
             if row_reg_ctx:
                 mat_real = float(row_reg_ctx["matriculas_real"] or 0)
                 mat_meta = float(row_reg_ctx["matriculas_meta"] or 0)
@@ -1447,27 +2007,6 @@ async def montar_preview_relatorio_executivo(conn, filtros, opcoes):
                     "receita_meta": rec_meta_ctx,
                     "receita_pct": _pct(rec_real_ctx, rec_meta_ctx),
                 })
-            
-            print(
-                "MAT:",
-                row_reg_ctx["matriculas_real"],
-                "/",
-                row_reg_ctx["matriculas_meta"]
-            )
-
-            print(
-                "HA:",
-                row_reg_ctx["ha_real"],
-                "/",
-                row_reg_ctx["ha_meta"]
-            )
-
-            print(
-                "REC:",
-                row_reg_ctx["receita_real"],
-                "/",
-                row_reg_ctx["receita_meta"]
-            )
         
         desempenho_subregiao_uo = []
 
@@ -1701,3 +2240,533 @@ async def montar_preview_relatorio_executivo(conn, filtros, opcoes):
             "incluir_acoes": opcoes.incluir_acoes
         }
     }
+
+async def montar_preview_relatorio_desempenho_programa(
+    conn,
+    filtros,
+    opcoes
+):
+    preview = await montar_preview_relatorio_executivo(
+        conn,
+        filtros,
+        opcoes
+    )
+
+    sql_cabecalho = """
+        SELECT
+            r.nome AS regiao,
+            s.nome AS subregiao,
+            u.nome AS uo,
+            u.geope AS geope
+        FROM uo u
+        LEFT JOIN subregioes s
+            ON s.codigo = u.cod_subregiao
+        LEFT JOIN regioes r
+            ON r.codigo = s.codigo_regiao
+        WHERE u.nome IS NOT NULL
+          AND TRIM(u.nome) <> ''
+          AND (
+                $1::text IS NULL
+                OR UPPER(TRIM(r.nome)) = UPPER(TRIM($1))
+          )
+          AND (
+                $2::text IS NULL
+                OR UPPER(TRIM(s.nome)) = UPPER(TRIM($2))
+          )
+          AND (
+                $3::text IS NULL
+                OR UPPER(TRIM(u.nome)) = UPPER(TRIM($3))
+          )
+        ORDER BY u.nome
+    """
+
+    rows_cabecalho = await conn.fetch(
+        sql_cabecalho,
+        filtros.regiao,
+        filtros.subregiao,
+        filtros.uo
+    )
+
+    uos = []
+    geopess = []
+    regiao_encontrada = filtros.regiao
+    subregiao_encontrada = filtros.subregiao
+
+    for row in rows_cabecalho:
+        nome_uo = row["uo"]
+        nome_geope = row["geope"]
+
+        if nome_uo and nome_uo not in uos:
+            uos.append(nome_uo)
+
+        if nome_geope and nome_geope not in geopess:
+            geopess.append(nome_geope)
+
+        if not regiao_encontrada and row["regiao"]:
+            regiao_encontrada = row["regiao"]
+
+        if not subregiao_encontrada and row["subregiao"]:
+            subregiao_encontrada = row["subregiao"]
+
+    preview["cabecalho_desempenho_programa"] = {
+        "programa": filtros.programa,
+        "regiao": regiao_encontrada,
+        "subregiao": subregiao_encontrada,
+        "geope": ", ".join(geopess) if geopess else None,
+        "uos": uos
+    }
+
+    programa_selecionado = (
+        filtros.programa
+        if getattr(filtros, "programa", None)
+        else None
+    )
+
+    preview["modo_desempenho_programa"] = (
+        "programa_unico"
+        if programa_selecionado
+        else "multiplos_programas"
+    )
+
+    preview["modo_agrupamento_desempenho"] = (
+        "subregiao_programa_uo"
+        if filtros.regiao and not filtros.subregiao
+        else "programa_uo"
+    )
+
+    if programa_selecionado:
+        programas_relatorio = [
+            programa_selecionado
+        ]
+    else:
+        programas_relatorio = sorted({
+            str(item.get("programa")).strip()
+            for item in preview.get(
+                "desempenho_programas",
+                []
+            )
+            if item.get("programa")
+        })
+
+    preview["programas_relatorio"] = programas_relatorio
+
+    # ======================================================
+    # MAPEAMENTO DE PROGRAMAS E UNIDADES OPERACIONAIS
+    # ======================================================
+
+    sql_programas_uos = """
+        WITH ultimo_lote_planejamento AS (
+            SELECT MAX(ps.lote_id) AS lote_id
+            FROM planejamento_staging ps
+            JOIN planejamento_import_lotes pil
+                ON pil.id = ps.lote_id
+            WHERE ps.flag_valida IS DISTINCT FROM FALSE
+              AND ps.tipo = 'META'
+              AND CAST(pil.ano_referencia AS integer) = $1
+        ),
+
+        relacoes AS (
+            -- Relações existentes nas ofertas
+            SELECT DISTINCT
+                UPPER(TRIM(p.nome_programa)) AS programa,
+                o.cod_uo AS cod_uo
+            FROM ofertas_programas o
+            JOIN programas p
+                ON p.codigo = o.cod_programa
+            WHERE o.ano = $1
+              AND UPPER(TRIM(p.nome_programa))
+                    = ANY($2::text[])
+
+            UNION
+
+            -- Relações existentes no planejamento
+            SELECT DISTINCT
+                UPPER(TRIM(ps.programa_raw)) AS programa,
+                u.codigo AS cod_uo
+            FROM planejamento_staging ps
+            JOIN ultimo_lote_planejamento ul
+                ON ul.lote_id = ps.lote_id
+            JOIN uo u
+                ON u.codigo::text = ps.cod_uo_raw::text
+            WHERE ps.flag_valida IS DISTINCT FROM FALSE
+              AND ps.tipo = 'META'
+              AND ps.programa_raw IS NOT NULL
+              AND UPPER(TRIM(ps.programa_raw))
+                    = ANY($2::text[])
+        )
+
+        SELECT DISTINCT
+            rel.programa,
+            u.nome AS uo
+        FROM relacoes rel
+        JOIN uo u
+            ON u.codigo = rel.cod_uo
+        LEFT JOIN subregioes s
+            ON s.codigo = u.cod_subregiao
+        LEFT JOIN regioes r
+            ON r.codigo = s.codigo_regiao
+        WHERE u.nome IS NOT NULL
+          AND TRIM(u.nome) <> ''
+
+          AND (
+                $3::text IS NULL
+                OR UPPER(TRIM(r.nome))
+                    = UPPER(TRIM($3))
+          )
+
+          AND (
+                $4::text IS NULL
+                OR UPPER(TRIM(s.nome))
+                    = UPPER(TRIM($4))
+          )
+
+          AND (
+                $5::text IS NULL
+                OR UPPER(TRIM(u.nome))
+                    = UPPER(TRIM($5))
+          )
+
+        ORDER BY
+            rel.programa,
+            u.nome
+    """
+
+    programas_normalizados = [
+        str(nome).strip().upper()
+        for nome in programas_relatorio
+        if nome
+    ]
+
+    rows_programas_uos = await conn.fetch(
+        sql_programas_uos,
+        filtros.ano,
+        programas_normalizados,
+        filtros.regiao,
+        filtros.subregiao,
+        filtros.uo
+    )
+
+    uos_por_programa = {
+        str(nome).strip().upper(): []
+        for nome in programas_relatorio
+        if nome
+    }
+
+    for row in rows_programas_uos:
+        chave_programa = (
+            str(row["programa"] or "")
+            .strip()
+            .upper()
+        )
+
+        nome_uo = (
+            str(row["uo"] or "")
+            .strip()
+        )
+
+        if (
+            chave_programa
+            and nome_uo
+            and nome_uo not in uos_por_programa.setdefault(
+                chave_programa,
+                []
+            )
+        ):
+            uos_por_programa[chave_programa].append(
+                nome_uo
+            )
+
+    preview["uos_por_programa"] = uos_por_programa
+
+    # ======================================================
+    # DESEMPENHO POR UO E MODALIDADE
+    # ======================================================
+
+    desempenho_uos = []
+    desempenho_programas_detalhado = []
+    subregioes_detalhadas = {}
+
+    for nome_programa in programas_relatorio:
+
+        chave_programa = (
+            str(nome_programa)
+            .strip()
+            .upper()
+        )
+
+        uos_programa = uos_por_programa.get(
+            chave_programa,
+            []
+        )
+
+        desempenho_uos_programa = []
+
+        for nome_uo in uos_programa:
+
+            # ----------------------------------------------
+            # Resultado do período selecionado
+            # ----------------------------------------------
+
+            filtros_uo_periodo = filtros.model_copy(
+                update={
+                    "programa": nome_programa,
+                    "uo": nome_uo
+                }
+            )
+
+            preview_uo_periodo = await montar_preview_relatorio_executivo(
+                conn,
+                filtros_uo_periodo,
+                opcoes
+            )
+
+            subregiao_nome = (
+                preview_uo_periodo.get("subregiao_uo")
+                or "SUB-REGIÃO NÃO INFORMADA"
+            )
+
+            modalidades_periodo = (
+                preview_uo_periodo.get(
+                    "desempenho_modalidades",
+                    []
+                )
+                or []
+            )
+
+            # ----------------------------------------------
+            # Meta anual
+            # ----------------------------------------------
+
+            filtros_uo_anual = filtros.model_copy(
+                update={
+                    "programa": nome_programa,
+                    "uo": nome_uo,
+                    "meses": list(range(1, 13))
+                }
+            )
+
+            preview_uo_anual = await montar_preview_relatorio_executivo(
+                conn,
+                filtros_uo_anual,
+                opcoes
+            )
+
+            modalidades_anuais = (
+                preview_uo_anual.get(
+                    "desempenho_modalidades",
+                    []
+                )
+                or []
+            )
+
+            # Facilita a busca da meta anual por modalidade
+            anual_por_modalidade = {
+                str(item.get("modalidade") or "").strip().upper(): item
+                for item in modalidades_anuais
+            }
+
+            matriculas = []
+            hora_aluno = []
+            receita = []
+
+            for modalidade_periodo in modalidades_periodo:
+
+                nome_modalidade = (
+                    modalidade_periodo.get("modalidade")
+                    or "NÃO INFORMADA"
+                )
+
+                chave_modalidade = (
+                    str(nome_modalidade)
+                    .strip()
+                    .upper()
+                )
+
+                modalidade_anual = anual_por_modalidade.get(
+                    chave_modalidade,
+                    {}
+                )
+
+                # ------------------------------------------
+                # Matrículas
+                # ------------------------------------------
+
+                matriculas_meta_periodo = float(
+                    modalidade_periodo.get(
+                        "matriculas_meta",
+                        0
+                    )
+                    or 0
+                )
+
+                matriculas_real_periodo = float(
+                    modalidade_periodo.get(
+                        "matriculas_real",
+                        0
+                    )
+                    or 0
+                )
+
+                matriculas_meta_anual = float(
+                    modalidade_anual.get(
+                        "matriculas_meta",
+                        0
+                    )
+                    or 0
+                )
+
+                matriculas.append({
+                    "modalidade": nome_modalidade,
+                    "meta_periodo": matriculas_meta_periodo,
+                    "realizado_periodo": matriculas_real_periodo,
+                    "meta_anual": matriculas_meta_anual,
+                    "atingimento": _pct(
+                        matriculas_real_periodo,
+                        matriculas_meta_periodo
+                    )
+                })
+
+                # ------------------------------------------
+                # Hora-Aluno
+                # ------------------------------------------
+
+                ha_meta_periodo = float(
+                    modalidade_periodo.get(
+                        "hora_aluno_meta",
+                        0
+                    )
+                    or 0
+                )
+
+                ha_real_periodo = float(
+                    modalidade_periodo.get(
+                        "hora_aluno_real",
+                        0
+                    )
+                    or 0
+                )
+
+                ha_meta_anual = float(
+                    modalidade_anual.get(
+                        "hora_aluno_meta",
+                        0
+                    )
+                    or 0
+                )
+
+                hora_aluno.append({
+                    "modalidade": nome_modalidade,
+                    "meta_periodo": ha_meta_periodo,
+                    "realizado_periodo": ha_real_periodo,
+                    "meta_anual": ha_meta_anual,
+                    "atingimento": _pct(
+                        ha_real_periodo,
+                        ha_meta_periodo
+                    )
+                })
+
+                # ------------------------------------------
+                # Receita
+                # ------------------------------------------
+
+                receita_meta_periodo = float(
+                    modalidade_periodo.get(
+                        "receita_meta",
+                        0
+                    )
+                    or 0
+                )
+
+                receita_real_periodo = float(
+                    modalidade_periodo.get(
+                        "receita_real",
+                        0
+                    )
+                    or 0
+                )
+
+                receita_meta_anual = float(
+                    modalidade_anual.get(
+                        "receita_meta",
+                        0
+                    )
+                    or 0
+                )
+
+                receita.append({
+                    "modalidade": nome_modalidade,
+                    "meta_periodo": receita_meta_periodo,
+                    "realizado_periodo": receita_real_periodo,
+                    "meta_anual": receita_meta_anual,
+                    "atingimento": _pct(
+                        receita_real_periodo,
+                        receita_meta_periodo
+                    )
+                })
+
+            analise_uo = _gerar_analise_unidade(
+                nome_uo=nome_uo,
+                programa=nome_programa,
+                matriculas=matriculas,
+                hora_aluno=hora_aluno,
+                receita=receita
+            )
+
+            desempenho_uos.append({
+                "uo": nome_uo,
+                "matriculas": matriculas,
+                "hora_aluno": hora_aluno,
+                "receita": receita,
+                "analise": analise_uo
+            })
+
+            desempenho_uos_programa.append({
+                "uo": nome_uo,
+                "matriculas": matriculas,
+                "hora_aluno": hora_aluno,
+                "receita": receita,
+                "analise": analise_uo
+            })
+
+            if subregiao_nome not in subregioes_detalhadas:
+                subregioes_detalhadas[subregiao_nome] = {}
+
+            if nome_programa not in subregioes_detalhadas[subregiao_nome]:
+                subregioes_detalhadas[subregiao_nome][nome_programa] = []
+
+            subregioes_detalhadas[subregiao_nome][nome_programa].append({
+                "uo": nome_uo,
+                "matriculas": matriculas,
+                "hora_aluno": hora_aluno,
+                "receita": receita,
+                "analise": analise_uo
+            })
+
+        desempenho_programas_detalhado.append({
+            "programa": nome_programa,
+            "uos": desempenho_uos_programa
+        })
+
+    preview["desempenho_uos"] = desempenho_uos
+
+    preview["desempenho_programas_detalhado"] = (
+        desempenho_programas_detalhado
+    )
+
+    preview["desempenho_subregioes_detalhado"] = [
+        {
+            "subregiao": nome_subregiao,
+            "programas": [
+                {
+                    "programa": nome_programa,
+                    "uos": uos_programa
+                }
+                for nome_programa, uos_programa
+                in programas_subregiao.items()
+            ]
+        }
+        for nome_subregiao, programas_subregiao
+        in subregioes_detalhadas.items()
+    ]
+
+    return preview

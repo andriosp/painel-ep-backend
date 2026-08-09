@@ -15,12 +15,17 @@ from typing import Optional, List
 from pydantic import BaseModel
 from pathlib import Path
 from pydantic import BaseModel
-from app.services.relatorio_executivo import montar_preview_relatorio_executivo
+from app.services.relatorio_executivo import (
+    montar_preview_relatorio_executivo,
+    montar_preview_relatorio_desempenho_programa
+)
 from fastapi.responses import StreamingResponse, FileResponse
 from app.services.pptx_carteira_programas import gerar_pptx_carteira_programas
+from app.services.pptx_caravana import gerar_pptx_caravana_base
 
 from app.services.pdf_relatorio_executivo import (
-    gerar_pdf_relatorio_executivo
+    gerar_pdf_relatorio_executivo,
+    gerar_pdf_relatorio_desempenho_programa
 )
 
 router = APIRouter()
@@ -1718,6 +1723,77 @@ async def processar_matriculas_realizadas(request: Request, lote_id: int):
 
         await conn.execute(
             """
+            INSERT INTO ofertas_programas (
+                cod_uo,
+                cr,
+                cod_programa,
+                cod_modalidade,
+                cod_financiamento,
+                qtd_matriculas,
+                qtd_hora_aluno,
+                valor_receita,
+                valor_despesa,
+                ano,
+                cod_formato,
+                origem
+            )
+            SELECT DISTINCT
+                s.cod_uo,
+                s.cr,
+                s.cod_programa,
+                s.cod_modalidade,
+                NULL::integer AS cod_financiamento,
+                0 AS qtd_matriculas,
+                0 AS qtd_hora_aluno,
+                0 AS valor_receita,
+                0 AS valor_despesa,
+                s.ano,
+                s.cod_formato,
+                'REALIZADO_SEM_PLANEJAMENTO' AS origem
+            FROM importacao_matriculas_staging s
+            WHERE s.id = ANY($1::bigint[])
+              AND s.status = 'PENDENTE'
+              AND s.cr IS NOT NULL
+              AND s.cod_uo IS NOT NULL
+              AND s.cod_programa IS NOT NULL
+              AND s.cod_modalidade IS NOT NULL
+              AND s.cod_formato IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM ofertas_programas o
+                  WHERE o.ano = s.ano
+                    AND o.cr = s.cr
+                    AND COALESCE(o.cod_uo, 0) = COALESCE(s.cod_uo, 0)
+                    AND COALESCE(o.cod_modalidade, 0) = COALESCE(s.cod_modalidade, 0)
+                    AND COALESCE(o.cod_programa, 0) = COALESCE(s.cod_programa, 0)
+                    AND COALESCE(o.cod_formato, 0) = COALESCE(s.cod_formato, 0)
+              )
+            """,
+            ids
+        )
+
+        await conn.execute(
+            """
+            UPDATE importacao_matriculas_staging s
+            SET
+                cod_oferta_resolvido = o.codigo,
+                status = 'RESOLVIDO',
+                erro = NULL
+            FROM ofertas_programas o
+            WHERE s.id = ANY($1::bigint[])
+              AND s.status = 'PENDENTE'
+              AND o.ano = s.ano
+              AND o.cr = s.cr
+              AND COALESCE(o.cod_uo,0)=COALESCE(s.cod_uo,0)
+              AND COALESCE(o.cod_modalidade,0)=COALESCE(s.cod_modalidade,0)
+              AND COALESCE(o.cod_programa,0)=COALESCE(s.cod_programa,0)
+              AND COALESCE(o.cod_formato,0)=COALESCE(s.cod_formato,0)
+            """,
+            ids
+        )
+
+        await conn.execute(
+            """
             UPDATE importacao_matriculas_staging
             SET status = 'ERRO',
                 erro = 'Oferta não encontrada para ano, CR, UO, programa, modalidade e formato.'
@@ -2212,6 +2288,77 @@ async def processar_receita(request: Request, lote_id: int):
             WHERE s.id = c.staging_id
                 AND c.qtd > 1
                 AND s.status = 'PENDENTE'
+            """,
+            ids
+        )
+
+        await conn.execute(
+            """
+            INSERT INTO ofertas_programas (
+                cod_uo,
+                cr,
+                cod_programa,
+                cod_modalidade,
+                cod_financiamento,
+                qtd_matriculas,
+                qtd_hora_aluno,
+                valor_receita,
+                valor_despesa,
+                ano,
+                cod_formato,
+                origem
+            )
+            SELECT DISTINCT
+                s.cod_uo,
+                s.cr,
+                s.cod_programa,
+                s.cod_modalidade,
+                NULL::integer AS cod_financiamento,
+                0 AS qtd_matriculas,
+                0 AS qtd_hora_aluno,
+                0 AS valor_receita,
+                0 AS valor_despesa,
+                s.ano,
+                s.cod_formato,
+                'REALIZADO_SEM_PLANEJAMENTO' AS origem
+            FROM importacao_receita_staging s
+            WHERE s.id = ANY($1::bigint[])
+            AND s.status = 'PENDENTE'
+            AND s.cr IS NOT NULL
+            AND s.cod_uo IS NOT NULL
+            AND s.cod_programa IS NOT NULL
+            AND s.cod_modalidade IS NOT NULL
+            AND s.cod_formato IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM ofertas_programas o
+                WHERE o.ano = s.ano
+                    AND o.cr = s.cr
+                    AND COALESCE(o.cod_uo, 0) = COALESCE(s.cod_uo, 0)
+                    AND COALESCE(o.cod_modalidade, 0) = COALESCE(s.cod_modalidade, 0)
+                    AND COALESCE(o.cod_programa, 0) = COALESCE(s.cod_programa, 0)
+                    AND COALESCE(o.cod_formato, 0) = COALESCE(s.cod_formato, 0)
+            )
+            """,
+            ids
+        )
+
+        await conn.execute(
+            """
+            UPDATE importacao_receita_staging s
+            SET
+                cod_oferta_resolvido = o.codigo,
+                status = 'RESOLVIDO',
+                erro = NULL
+            FROM ofertas_programas o
+            WHERE s.id = ANY($1::bigint[])
+              AND s.status = 'PENDENTE'
+              AND o.ano = s.ano
+              AND o.cr = s.cr
+              AND COALESCE(o.cod_uo,0)=COALESCE(s.cod_uo,0)
+              AND COALESCE(o.cod_modalidade,0)=COALESCE(s.cod_modalidade,0)
+              AND COALESCE(o.cod_programa,0)=COALESCE(s.cod_programa,0)
+              AND COALESCE(o.cod_formato,0)=COALESCE(s.cod_formato,0)
             """,
             ids
         )
@@ -4996,7 +5143,9 @@ def aplicar_filtros_turmas(sql: str, params: list, idx: int, filtros: dict):
 async def planejamento_resumo(
     request: Request,
     ano: int = 2026,
-    subregioes: str | None = None
+    subregioes: str | None = None,
+    regiao: str | None = None,
+    uo: str | None = None
 ):
     pool = request.app.state.pool
 
@@ -5040,12 +5189,37 @@ async def planejamento_resumo(
 
         params = [lote_id]
         filtro_sub = ""
+        filtro_regiao = ""
+        filtro_uo = ""
 
         if subregioes:
             ids = [int(x) for x in subregioes.split(",") if x.strip().isdigit()]
             if ids:
                 filtro_sub = f" AND s.codigo = ANY(${len(params)+1}::int[])"
                 params.append(ids)
+
+        if regiao:
+            params.append(regiao)
+
+            filtro_regiao = f"""
+            AND UPPER(TRIM(r.nome)) =
+                UPPER(TRIM(${len(params)}::text))
+            """
+
+        if uo and str(uo).strip().isdigit():
+            params.append(int(uo))
+
+            filtro_uo = f"""
+            AND NULLIF(
+                regexp_replace(
+                    COALESCE(ps.cod_uo_raw, ''),
+                    '[^0-9]',
+                    '',
+                    'g'
+                ),
+                ''
+            )::int = ${len(params)}
+            """
 
         sql = f"""
         WITH base AS (
@@ -5066,11 +5240,15 @@ async def planejamento_resumo(
                 COALESCE(ps.dez, 0) AS dez
             FROM planejamento_staging ps
             JOIN subregioes s
-              ON UPPER(TRIM(s.nome)) = UPPER(TRIM(ps.subregiao))
+                ON UPPER(TRIM(s.nome)) = UPPER(TRIM(ps.subregiao))
+            JOIN regioes r
+                ON r.codigo = s.codigo_regiao
             WHERE ps.lote_id = $1
-              AND ps.flag_valida = TRUE
-              AND UPPER(TRIM(COALESCE(ps.tipo, ''))) = 'META'
-              {filtro_sub}
+                AND ps.flag_valida = TRUE
+                AND UPPER(TRIM(COALESCE(ps.tipo, ''))) = 'META'
+                {filtro_sub}
+                {filtro_regiao}
+                {filtro_uo}
         )
         SELECT
             COALESCE(SUM(CASE
@@ -5341,7 +5519,9 @@ async def planejamento_uo(request: Request, ano: int = 2026):
 async def planejamento_regioes(
     request: Request,
     ano: int = 2026,
-    subregioes: str | None = None
+    subregioes: str | None = None,
+    regiao: str | None = None,
+    uo: str | None = None
 ):
     pool = request.app.state.pool
 
@@ -5363,6 +5543,7 @@ async def planejamento_regioes(
 
         params = [lote_id]
         filtro_regiao = ""
+        filtro_uo = ""
 
         if subregioes:
             ids = [int(x) for x in subregioes.split(",") if x.strip().isdigit()]
@@ -5377,6 +5558,21 @@ async def planejamento_regioes(
                 )
                 """
                 params.append(ids)
+
+        if uo and str(uo).strip().isdigit():
+            params.append(int(uo))
+
+            filtro_uo = f"""
+            AND NULLIF(
+                regexp_replace(
+                    COALESCE(ps.cod_uo_raw, ''),
+                    '[^0-9]',
+                    '',
+                    'g'
+                ),
+                ''
+            )::int = ${len(params)}
+            """
 
         sql = f"""
         WITH base AS (
@@ -5401,6 +5597,7 @@ async def planejamento_regioes(
               AND ps.flag_valida = TRUE
               AND UPPER(TRIM(COALESCE(ps.tipo, ''))) = 'META'
               {filtro_regiao}
+              {filtro_uo}
         )
         SELECT
             regiao,
@@ -5704,6 +5901,449 @@ async def planejamento_subregioes(
         resultado.append(d)
 
     return resultado
+
+@router.get("/planejamento/uos")
+async def planejamento_uos(
+    request: Request,
+    ano: int = 2026,
+    subregioes: str | None = None,
+    regiao: str | None = None,
+    uo: str | None = None,
+):
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        lote_id = await conn.fetchval(
+            """
+            SELECT id
+            FROM planejamento_import_lotes
+            WHERE ano_referencia = $1
+              AND status_processamento IN ('importado', 'processado')
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            ano
+        )
+
+        if not lote_id:
+            return []
+
+        params = [lote_id]
+        filtros = []
+
+        if subregioes:
+            ids_sub = [
+                int(x)
+                for x in subregioes.split(",")
+                if x.strip().isdigit()
+            ]
+
+            if ids_sub:
+                params.append(ids_sub)
+                filtros.append(
+                    f"s.codigo = ANY(${len(params)}::int[])"
+                )
+
+        if regiao and regiao.strip():
+            params.append(regiao.strip().upper())
+            filtros.append(
+                f"UPPER(TRIM(r.nome)) = ${len(params)}"
+            )
+
+        if uo and str(uo).strip().isdigit():
+            params.append(int(uo))
+            filtros.append(
+                f"u.codigo = ${len(params)}"
+            )
+
+        filtro_sql = ""
+
+        if filtros:
+            filtro_sql = " AND " + " AND ".join(filtros)
+
+        sql = f"""
+        WITH base AS (
+            SELECT
+                u.codigo AS cod_uo,
+                UPPER(TRIM(u.nome)) AS uo,
+                UPPER(TRIM(COALESCE(ps.financiamento_raw, ''))) AS financiamento,
+                UPPER(TRIM(COALESCE(ps.conta, ''))) AS conta,
+
+                COALESCE(ps.jan, 0) AS jan,
+                COALESCE(ps.fev, 0) AS fev,
+                COALESCE(ps.mar, 0) AS mar,
+                COALESCE(ps.abr, 0) AS abr,
+                COALESCE(ps.mai, 0) AS mai,
+                COALESCE(ps.jun, 0) AS jun,
+                COALESCE(ps.jul, 0) AS jul,
+                COALESCE(ps.ago, 0) AS ago,
+                COALESCE(ps.set_, 0) AS set_,
+                COALESCE(ps.out_, 0) AS out_,
+                COALESCE(ps.nov, 0) AS nov,
+                COALESCE(ps.dez, 0) AS dez
+
+            FROM planejamento_staging ps
+
+            JOIN uo u
+              ON u.codigo = NULLIF(
+                    regexp_replace(
+                        COALESCE(ps.cod_uo_raw, ''),
+                        '[^0-9]',
+                        '',
+                        'g'
+                    ),
+                    ''
+                 )::int
+
+            LEFT JOIN subregioes s
+              ON s.codigo = u.cod_subregiao
+
+            LEFT JOIN regioes r
+              ON r.codigo = s.codigo_regiao
+
+            WHERE ps.lote_id = $1
+              AND ps.flag_valida = TRUE
+              AND UPPER(TRIM(COALESCE(ps.tipo, ''))) = 'META'
+              {filtro_sql}
+        )
+
+        SELECT
+            cod_uo,
+            uo,
+
+            COALESCE(SUM(
+                CASE
+                    WHEN conta IN ('MATRÍCULAS', 'MATRICULAS')
+                    THEN jan + fev + mar + abr + mai + jun +
+                         jul + ago + set_ + out_ + nov + dez
+                    ELSE 0
+                END
+            ), 0) AS matriculas_total,
+
+            COALESCE(SUM(
+                CASE
+                    WHEN conta IN (
+                        'HORA ALUNO',
+                        'HORA-ALUNO',
+                        'HORA_ALUNO'
+                    )
+                    THEN jan + fev + mar + abr + mai + jun +
+                         jul + ago + set_ + out_ + nov + dez
+                    ELSE 0
+                END
+            ), 0) AS hora_aluno_total,
+
+            COALESCE(SUM(
+                CASE
+                    WHEN conta IN (
+                        'RECEITAS CORRENTES',
+                        'RECEITA',
+                        'RECEITAS'
+                    )
+                    THEN jan + fev + mar + abr + mai + jun +
+                         jul + ago + set_ + out_ + nov + dez
+                    ELSE 0
+                END
+            ), 0) AS receita_total,
+
+            COALESCE(SUM(
+                CASE
+                    WHEN conta IN (
+                        'DESPESAS CORRENTES',
+                        'DESPESA',
+                        'DESPESAS'
+                    )
+                    THEN jan + fev + mar + abr + mai + jun +
+                         jul + ago + set_ + out_ + nov + dez
+                    ELSE 0
+                END
+            ), 0) AS despesa_total,
+
+            COALESCE(SUM(
+                CASE
+                    WHEN conta IN ('MATRÍCULAS', 'MATRICULAS')
+                     AND financiamento = 'GRATUIDADE REGIMENTAL'
+                    THEN jan + fev + mar + abr + mai + jun +
+                         jul + ago + set_ + out_ + nov + dez
+                    ELSE 0
+                END
+            ), 0) AS gr_matriculas,
+
+            COALESCE(SUM(
+                CASE
+                    WHEN conta IN (
+                        'HORA ALUNO',
+                        'HORA-ALUNO',
+                        'HORA_ALUNO'
+                    )
+                     AND financiamento = 'GRATUIDADE REGIMENTAL'
+                    THEN jan + fev + mar + abr + mai + jun +
+                         jul + ago + set_ + out_ + nov + dez
+                    ELSE 0
+                END
+            ), 0) AS gr_hora_aluno,
+
+            COALESCE(SUM(
+                CASE
+                    WHEN conta IN (
+                        'RECEITAS CORRENTES',
+                        'RECEITA',
+                        'RECEITAS'
+                    )
+                     AND financiamento = 'GRATUIDADE REGIMENTAL'
+                    THEN jan + fev + mar + abr + mai + jun +
+                         jul + ago + set_ + out_ + nov + dez
+                    ELSE 0
+                END
+            ), 0) AS gr_receita,
+
+            COALESCE(SUM(
+                CASE
+                    WHEN conta IN ('MATRÍCULAS', 'MATRICULAS')
+                     AND financiamento IN (
+                        'GRATUIDADE NÃO REGIMENTAL',
+                        'GRATUIDADE NAO REGIMENTAL',
+                        'GRATUITO'
+                     )
+                    THEN jan + fev + mar + abr + mai + jun +
+                         jul + ago + set_ + out_ + nov + dez
+                    ELSE 0
+                END
+            ), 0) AS g_matriculas,
+
+            COALESCE(SUM(
+                CASE
+                    WHEN conta IN (
+                        'HORA ALUNO',
+                        'HORA-ALUNO',
+                        'HORA_ALUNO'
+                    )
+                     AND financiamento IN (
+                        'GRATUIDADE NÃO REGIMENTAL',
+                        'GRATUIDADE NAO REGIMENTAL',
+                        'GRATUITO'
+                     )
+                    THEN jan + fev + mar + abr + mai + jun +
+                         jul + ago + set_ + out_ + nov + dez
+                    ELSE 0
+                END
+            ), 0) AS g_hora_aluno,
+
+            COALESCE(SUM(
+                CASE
+                    WHEN conta IN (
+                        'RECEITAS CORRENTES',
+                        'RECEITA',
+                        'RECEITAS'
+                    )
+                     AND financiamento IN (
+                        'GRATUIDADE NÃO REGIMENTAL',
+                        'GRATUIDADE NAO REGIMENTAL',
+                        'GRATUITO'
+                     )
+                    THEN jan + fev + mar + abr + mai + jun +
+                         jul + ago + set_ + out_ + nov + dez
+                    ELSE 0
+                END
+            ), 0) AS g_receita,
+
+            COALESCE(SUM(
+                CASE
+                    WHEN conta IN ('MATRÍCULAS', 'MATRICULAS')
+                     AND financiamento NOT IN (
+                        'GRATUIDADE REGIMENTAL',
+                        'GRATUIDADE NÃO REGIMENTAL',
+                        'GRATUIDADE NAO REGIMENTAL',
+                        'GRATUITO'
+                     )
+                    THEN jan + fev + mar + abr + mai + jun +
+                         jul + ago + set_ + out_ + nov + dez
+                    ELSE 0
+                END
+            ), 0) AS p_matriculas,
+
+            COALESCE(SUM(
+                CASE
+                    WHEN conta IN (
+                        'HORA ALUNO',
+                        'HORA-ALUNO',
+                        'HORA_ALUNO'
+                    )
+                     AND financiamento NOT IN (
+                        'GRATUIDADE REGIMENTAL',
+                        'GRATUIDADE NÃO REGIMENTAL',
+                        'GRATUIDADE NAO REGIMENTAL',
+                        'GRATUITO'
+                     )
+                    THEN jan + fev + mar + abr + mai + jun +
+                         jul + ago + set_ + out_ + nov + dez
+                    ELSE 0
+                END
+            ), 0) AS p_hora_aluno,
+
+            COALESCE(SUM(
+                CASE
+                    WHEN conta IN (
+                        'RECEITAS CORRENTES',
+                        'RECEITA',
+                        'RECEITAS'
+                    )
+                     AND financiamento NOT IN (
+                        'GRATUIDADE REGIMENTAL',
+                        'GRATUIDADE NÃO REGIMENTAL',
+                        'GRATUIDADE NAO REGIMENTAL',
+                        'GRATUITO'
+                     )
+                    THEN jan + fev + mar + abr + mai + jun +
+                         jul + ago + set_ + out_ + nov + dez
+                    ELSE 0
+                END
+            ), 0) AS p_receita
+
+        FROM base
+        GROUP BY cod_uo, uo
+        ORDER BY uo
+        """
+
+        rows = await conn.fetch(sql, *params)
+
+    resultado = []
+
+    for row in rows:
+        d = dict(row)
+
+        total_mat = float(d["matriculas_total"] or 0)
+
+        d["gr_matriculas_pct"] = (
+            round(
+                float(d["gr_matriculas"] or 0)
+                / total_mat
+                * 100,
+                2
+            )
+            if total_mat
+            else 0
+        )
+
+        d["g_matriculas_pct"] = (
+            round(
+                float(d["g_matriculas"] or 0)
+                / total_mat
+                * 100,
+                2
+            )
+            if total_mat
+            else 0
+        )
+
+        d["p_matriculas_pct"] = (
+            round(
+                float(d["p_matriculas"] or 0)
+                / total_mat
+                * 100,
+                2
+            )
+            if total_mat
+            else 0
+        )
+
+        resultado.append(d)
+
+    return resultado
+
+@router.get("/planejamento/filtros/uos")
+async def planejamento_filtro_uos(
+    request: Request,
+    ano: int = 2026,
+    regiao: str | None = None,
+    subregioes: str | None = None
+):
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+
+        lote_id = await conn.fetchval(
+            """
+            SELECT id
+            FROM planejamento_import_lotes
+            WHERE ano_referencia = $1
+              AND status_processamento IN ('importado', 'processado')
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            ano
+        )
+
+        if not lote_id:
+            return []
+
+        params = [lote_id]
+
+        filtros = [
+            "ps.lote_id = $1",
+            "ps.flag_valida = TRUE"
+        ]
+
+        if regiao:
+            params.append(regiao)
+
+            filtros.append(
+                f"""
+                UPPER(TRIM(r.nome)) =
+                UPPER(TRIM(${len(params)}::text))
+                """
+            )
+
+        if subregioes:
+            ids_subregioes = [
+                int(x)
+                for x in subregioes.split(",")
+                if x.strip().isdigit()
+            ]
+
+            if ids_subregioes:
+                params.append(ids_subregioes)
+
+                filtros.append(
+                    f"""
+                    s.codigo =
+                    ANY(${len(params)}::int[])
+                    """
+                )
+
+        sql = f"""
+            SELECT DISTINCT
+                u.codigo,
+                u.nome
+
+            FROM planejamento_staging ps
+
+            JOIN uo u
+              ON u.codigo =
+                 NULLIF(
+                    regexp_replace(
+                        COALESCE(ps.cod_uo_raw, ''),
+                        '[^0-9]',
+                        '',
+                        'g'
+                    ),
+                    ''
+                 )::int
+
+            LEFT JOIN subregioes s
+              ON s.codigo = u.cod_subregiao
+
+            LEFT JOIN regioes r
+              ON r.codigo = s.codigo_regiao
+
+            WHERE {' AND '.join(filtros)}
+
+            ORDER BY u.nome
+        """
+
+        rows = await conn.fetch(sql, *params)
+
+    return [dict(row) for row in rows]
 
 @router.get("/planejamento/filtros/subregioes")
 async def planejamento_filtro_subregioes(request: Request, ano: int = 2026):
@@ -8946,7 +9586,7 @@ async def performance_preditiva(
         SELECT
             m.mes,
             COALESCE(mt.valor, 0) AS meta,
-            COALESCE(rl.valor, 0) AS realizado,
+            rl.valor AS realizado,
             COALESCE(pj.valor, 0) AS projetado
         FROM meses m
         LEFT JOIN meta mt ON mt.mes = m.mes
@@ -8963,15 +9603,962 @@ async def performance_preditiva(
             serie.append({
                 "mes": int(row["mes"]),
                 "meta": float(row["meta"] or 0),
-                "realizado": float(row["realizado"] or 0),
+                "realizado": None if row["realizado"] is None else float(row["realizado"]),
                 "projetado": float(row["projetado"] or 0),
             })
 
         return serie
+    
+    async def buscar_serie_modalidade():
+        params = [ano]
+        idx = 2
+
+        filtro_sub = ""
+        filtro_regiao = ""
+        filtro_programa = ""
+
+        # ---------------------------------------------------------
+        # FILTRO DE SUB-REGIÃO
+        # ---------------------------------------------------------
+        if ids_sub:
+            filtro_sub = (
+                f" AND u.cod_subregiao = ANY(${idx}::int[])"
+            )
+
+            params.append(ids_sub)
+            idx += 1
+
+        # ---------------------------------------------------------
+        # FILTRO DE REGIÃO
+        # ---------------------------------------------------------
+        if regiao:
+            filtro_regiao = f"""
+                AND EXISTS (
+                    SELECT 1
+                    FROM subregioes sr
+                    JOIN regioes rg
+                        ON rg.codigo = sr.codigo_regiao
+                    WHERE sr.codigo = u.cod_subregiao
+                    AND UPPER(TRIM(rg.nome)) =
+                        UPPER(TRIM(${idx}))
+                )
+            """
+
+            params.append(regiao)
+            idx += 1
+
+        # ---------------------------------------------------------
+        # FILTRO DE PROGRAMA
+        # ---------------------------------------------------------
+        if ids_prog_txt:
+            filtro_programa = (
+                f"""
+                AND pn.programa_id_txt =
+                    ANY(${idx}::text[])
+                """
+            )
+
+            params.append(ids_prog_txt)
+            idx += 1
+
+        sql = f"""
+            WITH meses AS (
+                SELECT generate_series(1, 12) AS mes
+            ),
+
+            programas_norm AS (
+                SELECT
+                    TRIM(
+                        COALESCE(codigo::text, '')
+                    ) AS codigo_txt,
+
+                    CASE
+                        WHEN TRIM(
+                            COALESCE(codigo::text, '')
+                        ) = '29'
+                        THEN '11'
+
+                        WHEN TRIM(
+                            COALESCE(codigo::text, '')
+                        ) = '30'
+                        THEN '7'
+
+                        ELSE TRIM(
+                            COALESCE(codigo::text, '')
+                        )
+                    END AS programa_id_txt
+
+                FROM programas
+            ),
+
+            ofertas_filtradas AS (
+                SELECT DISTINCT
+                    o.codigo AS cod_oferta,
+                    o.cod_modalidade,
+                    o.cod_programa,
+                    pn.programa_id_txt
+
+                FROM ofertas_programas o
+
+                JOIN uo u
+                    ON u.codigo = o.cod_uo
+
+                JOIN programas_norm pn
+                    ON pn.codigo_txt =
+                    TRIM(
+                        COALESCE(
+                            o.cod_programa::text,
+                            ''
+                        )
+                    )
+
+                WHERE o.ano = $1
+
+                {filtro_sub}
+                {filtro_regiao}
+                {filtro_programa}
+            ),
+
+            modalidades_existentes AS (
+                SELECT DISTINCT
+                    md.codigo AS cod_modalidade,
+                    md.nome AS nome_modalidade
+
+                FROM modalidade md
+
+                WHERE md.codigo IS NOT NULL
+            ),
+
+            meta_modalidade AS (
+                SELECT
+                    md.codigo AS cod_modalidade,
+
+                    COALESCE(
+                        SUM(
+                            COALESCE(ps.jan, 0) +
+                            COALESCE(ps.fev, 0) +
+                            COALESCE(ps.mar, 0) +
+                            COALESCE(ps.abr, 0) +
+                            COALESCE(ps.mai, 0) +
+                            COALESCE(ps.jun, 0) +
+                            COALESCE(ps.jul, 0) +
+                            COALESCE(ps.ago, 0) +
+                            COALESCE(ps.set_, 0) +
+                            COALESCE(ps.out_, 0) +
+                            COALESCE(ps.nov, 0) +
+                            COALESCE(ps.dez, 0)
+                        ),
+                        0
+                    ) AS meta
+
+                FROM planejamento_staging ps
+
+                JOIN modalidade md
+                    ON UPPER(
+                        TRIM(
+                            COALESCE(md.nome::text, '')
+                        )
+                    ) =
+                    UPPER(
+                        TRIM(
+                            COALESCE(ps.modalidade_raw::text, '')
+                        )
+                    )
+
+                WHERE ps.lote_id = (
+                    SELECT id
+                    FROM planejamento_import_lotes
+                    WHERE CAST(ano_referencia AS integer) = $1
+                    AND status_processamento = 'processado'
+                    ORDER BY id DESC
+                    LIMIT 1
+                )
+
+                AND ps.flag_valida = TRUE
+
+                AND UPPER(
+                    TRIM(
+                        COALESCE(ps.tipo::text, '')
+                    )
+                ) = 'META'
+
+                AND UPPER(
+                    TRIM(
+                        COALESCE(ps.conta::text, '')
+                    )
+                ) IN (
+                    'MATRÍCULAS',
+                    'MATRICULAS'
+                )
+
+                GROUP BY md.codigo
+            ),
+
+            realizado AS (
+                SELECT
+                    ofi.cod_modalidade,
+                    rp.mes,
+
+                    COALESCE(
+                        SUM(rp.matriculas_real),
+                        0
+                    ) AS valor
+
+                FROM ofertas_filtradas ofi
+
+                JOIN realizado_programas rp
+                    ON rp.cod_oferta = ofi.cod_oferta
+                AND rp.ano = $1
+
+                GROUP BY
+                    ofi.cod_modalidade,
+                    rp.mes
+            ),
+
+            projetado AS (
+                SELECT
+                    ofi.cod_modalidade,
+                    pp.mes,
+
+                    COALESCE(
+                        SUM(pp.matriculas_proj),
+                        0
+                    ) AS valor
+
+                FROM ofertas_filtradas ofi
+
+                JOIN projetado_programas pp
+                    ON pp.cod_oferta = ofi.cod_oferta
+                AND pp.ano = $1
+
+                GROUP BY
+                    ofi.cod_modalidade,
+                    pp.mes
+            )
+
+            SELECT
+                me.cod_modalidade,
+                me.nome_modalidade,
+                m.mes,
+
+                COALESCE(
+                    mm.meta,
+                    0
+                ) AS meta,
+
+                rl.valor AS realizado,
+
+                COALESCE(
+                    pj.valor,
+                    0
+                ) AS projetado
+
+            FROM modalidades_existentes me
+
+            CROSS JOIN meses m
+
+            LEFT JOIN realizado rl
+                ON rl.cod_modalidade =
+                me.cod_modalidade
+            AND rl.mes = m.mes
+
+            LEFT JOIN projetado pj
+                ON pj.cod_modalidade =
+                me.cod_modalidade
+            AND pj.mes = m.mes
+
+            LEFT JOIN meta_modalidade mm
+                ON mm.cod_modalidade =
+                me.cod_modalidade
+
+            ORDER BY
+                me.nome_modalidade,
+                m.mes
+        """
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                sql,
+                *params
+            )
+
+        modalidades = {}
+
+        for row in rows:
+            codigo = int(
+                row["cod_modalidade"]
+            )
+
+            if codigo not in modalidades:
+                modalidades[codigo] = {
+                    "codigo": codigo,
+
+                    "nome": (
+                        row["nome_modalidade"]
+                        or f"Modalidade {codigo}"
+                    ),
+
+                    "meta": float(
+                        row["meta"] or 0
+                    ),
+
+                    "serie": []
+                }
+
+            modalidades[codigo]["serie"].append({
+                "mes": int(row["mes"]),
+
+                "realizado": (
+                    None
+                    if row["realizado"] is None
+                    else float(row["realizado"])
+                ),
+
+                "projetado": float(
+                    row["projetado"] or 0
+                )
+            })
+
+        return modalidades
+    
+    async def buscar_serie_hora_aluno_modalidade():
+        params = [ano]
+        idx = 2 
+
+        filtro_sub = ""
+        filtro_regiao = ""
+        filtro_programa = ""
+
+        # ---------------------------------------------------------
+        # FILTRO DE SUB-REGIÃO
+        # ---------------------------------------------------------
+        if ids_sub:
+            filtro_sub = (
+                f" AND u.cod_subregiao = ANY(${idx}::int[])"
+            )
+
+            params.append(ids_sub)
+            idx += 1
+
+        # ---------------------------------------------------------
+        # FILTRO DE REGIÃO
+        # ---------------------------------------------------------
+        if regiao:
+            filtro_regiao = f"""
+                AND EXISTS (
+                    SELECT 1
+                    FROM subregioes sr
+                    JOIN regioes rg
+                        ON rg.codigo = sr.codigo_regiao
+                    WHERE sr.codigo = u.cod_subregiao
+                    AND UPPER(TRIM(rg.nome)) =
+                        UPPER(TRIM(${idx}))
+                )
+            """
+
+            params.append(regiao)
+            idx += 1
+
+        # ---------------------------------------------------------
+        # FILTRO DE PROGRAMA
+        # ---------------------------------------------------------
+        if ids_prog_txt:
+            filtro_programa = (
+                f"""
+                AND pn.programa_id_txt =
+                    ANY(${idx}::text[])
+                """
+            )
+
+            params.append(ids_prog_txt)
+            idx += 1
+
+        sql = f"""
+            WITH meses AS (
+                SELECT generate_series(1, 12) AS mes
+            ),
+
+            programas_norm AS (
+                SELECT
+                    TRIM(
+                        COALESCE(codigo::text, '')
+                    ) AS codigo_txt,
+
+                    CASE
+                        WHEN TRIM(
+                            COALESCE(codigo::text, '')
+                        ) = '29'
+                        THEN '11'
+
+                        WHEN TRIM(
+                            COALESCE(codigo::text, '')
+                        ) = '30'
+                        THEN '7'
+
+                        ELSE TRIM(
+                            COALESCE(codigo::text, '')
+                        )
+                    END AS programa_id_txt
+
+                FROM programas
+            ),
+
+            ofertas_filtradas AS (
+                SELECT DISTINCT
+                    o.codigo AS cod_oferta,
+                    o.cod_modalidade,
+                    o.cod_programa,
+                    pn.programa_id_txt
+
+                FROM ofertas_programas o
+
+                JOIN uo u
+                    ON u.codigo = o.cod_uo
+
+                JOIN programas_norm pn
+                    ON pn.codigo_txt =
+                    TRIM(
+                        COALESCE(
+                            o.cod_programa::text,
+                            ''
+                        )
+                    )
+
+                WHERE o.ano = $1
+
+                {filtro_sub}
+                {filtro_regiao}
+                {filtro_programa}
+            ),
+
+            modalidades_existentes AS (
+                SELECT DISTINCT
+                    md.codigo AS cod_modalidade,
+                    md.nome AS nome_modalidade
+
+                FROM modalidade md
+
+                WHERE md.codigo IS NOT NULL
+            ),
+
+            meta_modalidade AS (
+                SELECT
+                    md.codigo AS cod_modalidade,
+
+                    COALESCE(
+                        SUM(
+                            COALESCE(ps.jan, 0) +
+                            COALESCE(ps.fev, 0) +
+                            COALESCE(ps.mar, 0) +
+                            COALESCE(ps.abr, 0) +
+                            COALESCE(ps.mai, 0) +
+                            COALESCE(ps.jun, 0) +
+                            COALESCE(ps.jul, 0) +
+                            COALESCE(ps.ago, 0) +
+                            COALESCE(ps.set_, 0) +
+                            COALESCE(ps.out_, 0) +
+                            COALESCE(ps.nov, 0) +
+                            COALESCE(ps.dez, 0)
+                        ),
+                        0
+                    ) AS meta
+
+                FROM planejamento_staging ps
+
+                JOIN modalidade md
+                    ON UPPER(
+                        TRIM(
+                            COALESCE(md.nome::text, '')
+                        )
+                    ) =
+                    UPPER(
+                        TRIM(
+                            COALESCE(ps.modalidade_raw::text, '')
+                        )
+                    )
+
+                WHERE ps.lote_id = (
+                    SELECT id
+                    FROM planejamento_import_lotes
+                    WHERE CAST(ano_referencia AS integer) = $1
+                    AND status_processamento = 'processado'
+                    ORDER BY id DESC
+                    LIMIT 1
+                )
+
+                AND ps.flag_valida = TRUE
+
+                AND UPPER(
+                    TRIM(
+                        COALESCE(ps.tipo::text, '')
+                    )
+                ) = 'META'
+
+                AND UPPER(
+                    TRIM(
+                        COALESCE(ps.conta::text, '')
+                    )
+                ) IN (
+                    'HORA ALUNO',
+                    'HORA-ALUNO',
+                    'HORA_ALUNO'
+                )
+
+                GROUP BY md.codigo
+            ),
+
+            realizado AS (
+                SELECT
+                    ofi.cod_modalidade,
+                    rp.mes,
+
+                    COALESCE(
+                        SUM(rp.ha_real),
+                        0
+                    ) AS valor
+
+                FROM ofertas_filtradas ofi
+
+                JOIN realizado_programas rp
+                    ON rp.cod_oferta = ofi.cod_oferta
+                AND rp.ano = $1
+
+                GROUP BY
+                    ofi.cod_modalidade,
+                    rp.mes
+            ),
+
+            projetado AS (
+                SELECT
+                    ofi.cod_modalidade,
+                    pp.mes,
+
+                    COALESCE(
+                        SUM(pp.ha_proj),
+                        0
+                    ) AS valor
+
+                FROM ofertas_filtradas ofi
+
+                JOIN projetado_programas pp
+                    ON pp.cod_oferta = ofi.cod_oferta
+                AND pp.ano = $1
+
+                GROUP BY
+                    ofi.cod_modalidade,
+                    pp.mes
+            )
+
+            SELECT
+                me.cod_modalidade,
+                me.nome_modalidade,
+                m.mes,
+
+                COALESCE(
+                    mm.meta,
+                    0
+                ) AS meta,
+
+                rl.valor AS realizado,
+
+                COALESCE(
+                    pj.valor,
+                    0
+                ) AS projetado
+
+            FROM modalidades_existentes me
+
+            CROSS JOIN meses m
+
+            LEFT JOIN realizado rl
+                ON rl.cod_modalidade =
+                me.cod_modalidade
+            AND rl.mes = m.mes
+
+            LEFT JOIN projetado pj
+                ON pj.cod_modalidade =
+                me.cod_modalidade
+            AND pj.mes = m.mes
+
+            LEFT JOIN meta_modalidade mm
+                ON mm.cod_modalidade =
+                me.cod_modalidade
+
+            ORDER BY
+                me.nome_modalidade,
+                m.mes
+        """
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                sql,
+                *params
+            )
+
+        modalidades = {}
+
+        for row in rows:
+            codigo = int(
+                row["cod_modalidade"]
+            )
+
+            if codigo not in modalidades:
+                modalidades[codigo] = {
+                    "codigo": codigo,
+
+                    "nome": (
+                        row["nome_modalidade"]
+                        or f"Modalidade {codigo}"
+                    ),
+
+                    "meta": float(
+                        row["meta"] or 0
+                    ),
+
+                    "serie": []
+                }
+
+            modalidades[codigo]["serie"].append({
+                "mes": int(row["mes"]),
+
+                "realizado": (
+                    None
+                    if row["realizado"] is None
+                    else float(row["realizado"])
+                ),
+
+                "projetado": float(
+                    row["projetado"] or 0
+                )
+            })
+
+        return modalidades
+    
+    async def buscar_serie_receita_modalidade():
+        params = [ano]
+        idx = 2 
+
+        filtro_sub = ""
+        filtro_regiao = ""
+        filtro_programa = ""
+
+        # ---------------------------------------------------------
+        # FILTRO DE SUB-REGIÃO
+        # ---------------------------------------------------------
+        if ids_sub:
+            filtro_sub = (
+                f" AND u.cod_subregiao = ANY(${idx}::int[])"
+            )
+
+            params.append(ids_sub)
+            idx += 1
+
+        # ---------------------------------------------------------
+        # FILTRO DE REGIÃO
+        # ---------------------------------------------------------
+        if regiao:
+            filtro_regiao = f"""
+                AND EXISTS (
+                    SELECT 1
+                    FROM subregioes sr
+                    JOIN regioes rg
+                        ON rg.codigo = sr.codigo_regiao
+                    WHERE sr.codigo = u.cod_subregiao
+                    AND UPPER(TRIM(rg.nome)) =
+                        UPPER(TRIM(${idx}))
+                )
+            """
+
+            params.append(regiao)
+            idx += 1
+
+        # ---------------------------------------------------------
+        # FILTRO DE PROGRAMA
+        # ---------------------------------------------------------
+        if ids_prog_txt:
+            filtro_programa = (
+                f"""
+                AND pn.programa_id_txt =
+                    ANY(${idx}::text[])
+                """
+            )
+
+            params.append(ids_prog_txt)
+            idx += 1
+
+        sql = f"""
+            WITH meses AS (
+                SELECT generate_series(1, 12) AS mes
+            ),
+
+            programas_norm AS (
+                SELECT
+                    TRIM(
+                        COALESCE(codigo::text, '')
+                    ) AS codigo_txt,
+
+                    CASE
+                        WHEN TRIM(
+                            COALESCE(codigo::text, '')
+                        ) = '29'
+                        THEN '11'
+
+                        WHEN TRIM(
+                            COALESCE(codigo::text, '')
+                        ) = '30'
+                        THEN '7'
+
+                        ELSE TRIM(
+                            COALESCE(codigo::text, '')
+                        )
+                    END AS programa_id_txt
+
+                FROM programas
+            ),
+
+            ofertas_filtradas AS (
+                SELECT DISTINCT
+                    o.codigo AS cod_oferta,
+                    o.cod_modalidade,
+                    o.cod_programa,
+                    pn.programa_id_txt
+
+                FROM ofertas_programas o
+
+                JOIN uo u
+                    ON u.codigo = o.cod_uo
+
+                JOIN programas_norm pn
+                    ON pn.codigo_txt =
+                    TRIM(
+                        COALESCE(
+                            o.cod_programa::text,
+                            ''
+                        )
+                    )
+
+                WHERE o.ano = $1
+
+                {filtro_sub}
+                {filtro_regiao}
+                {filtro_programa}
+            ),
+
+            modalidades_existentes AS (
+                SELECT DISTINCT
+                    md.codigo AS cod_modalidade,
+                    md.nome AS nome_modalidade
+
+                FROM modalidade md
+
+                WHERE md.codigo IS NOT NULL
+            ),
+
+            meta_modalidade AS (
+                SELECT
+                    md.codigo AS cod_modalidade,
+
+                    COALESCE(
+                        SUM(
+                            COALESCE(ps.jan, 0) +
+                            COALESCE(ps.fev, 0) +
+                            COALESCE(ps.mar, 0) +
+                            COALESCE(ps.abr, 0) +
+                            COALESCE(ps.mai, 0) +
+                            COALESCE(ps.jun, 0) +
+                            COALESCE(ps.jul, 0) +
+                            COALESCE(ps.ago, 0) +
+                            COALESCE(ps.set_, 0) +
+                            COALESCE(ps.out_, 0) +
+                            COALESCE(ps.nov, 0) +
+                            COALESCE(ps.dez, 0)
+                        ),
+                        0
+                    ) AS meta
+
+                FROM planejamento_staging ps
+
+                JOIN modalidade md
+                    ON UPPER(
+                        TRIM(
+                            COALESCE(md.nome::text, '')
+                        )
+                    ) =
+                    UPPER(
+                        TRIM(
+                            COALESCE(ps.modalidade_raw::text, '')
+                        )
+                    )
+
+                WHERE ps.lote_id = (
+                    SELECT id
+                    FROM planejamento_import_lotes
+                    WHERE CAST(ano_referencia AS integer) = $1
+                    AND status_processamento = 'processado'
+                    ORDER BY id DESC
+                    LIMIT 1
+                )
+
+                AND ps.flag_valida = TRUE
+
+                AND UPPER(
+                    TRIM(
+                        COALESCE(ps.tipo::text, '')
+                    )
+                ) = 'META'
+
+                AND UPPER(
+                    TRIM(
+                        COALESCE(ps.conta::text, '')
+                    )
+                ) IN (
+                    'RECEITAS CORRENTES',
+                    'RECEITA',
+                    'RECEITAS'
+                )
+
+                GROUP BY md.codigo
+            ),
+
+            realizado AS (
+                SELECT
+                    ofi.cod_modalidade,
+                    rp.mes,
+
+                    COALESCE(
+                        SUM(rp.receita_real),
+                        0
+                    ) AS valor
+
+                FROM ofertas_filtradas ofi
+
+                JOIN realizado_programas rp
+                    ON rp.cod_oferta = ofi.cod_oferta
+                AND rp.ano = $1
+
+                GROUP BY
+                    ofi.cod_modalidade,
+                    rp.mes
+            ),
+
+            projetado AS (
+                SELECT
+                    ofi.cod_modalidade,
+                    pp.mes,
+
+                    COALESCE(
+                        SUM(pp.receita_proj),
+                        0
+                    ) AS valor
+
+                FROM ofertas_filtradas ofi
+
+                JOIN projetado_programas pp
+                    ON pp.cod_oferta = ofi.cod_oferta
+                AND pp.ano = $1
+
+                GROUP BY
+                    ofi.cod_modalidade,
+                    pp.mes
+            )
+
+            SELECT
+                me.cod_modalidade,
+                me.nome_modalidade,
+                m.mes,
+
+                COALESCE(
+                    mm.meta,
+                    0
+                ) AS meta,
+
+                rl.valor AS realizado,
+
+                COALESCE(
+                    pj.valor,
+                    0
+                ) AS projetado
+
+            FROM modalidades_existentes me
+
+            CROSS JOIN meses m
+
+            LEFT JOIN realizado rl
+                ON rl.cod_modalidade =
+                me.cod_modalidade
+            AND rl.mes = m.mes
+
+            LEFT JOIN projetado pj
+                ON pj.cod_modalidade =
+                me.cod_modalidade
+            AND pj.mes = m.mes
+
+            LEFT JOIN meta_modalidade mm
+                ON mm.cod_modalidade =
+                me.cod_modalidade
+
+            ORDER BY
+                me.nome_modalidade,
+                m.mes
+        """
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                sql,
+                *params
+            )
+
+        modalidades = {}
+
+        for row in rows:
+            codigo = int(
+                row["cod_modalidade"]
+            )
+
+            if codigo not in modalidades:
+                modalidades[codigo] = {
+                    "codigo": codigo,
+
+                    "nome": (
+                        row["nome_modalidade"]
+                        or f"Modalidade {codigo}"
+                    ),
+
+                    "meta": float(
+                        row["meta"] or 0
+                    ),
+
+                    "serie": []
+                }
+
+            modalidades[codigo]["serie"].append({
+                "mes": int(row["mes"]),
+
+                "realizado": (
+                    None
+                    if row["realizado"] is None
+                    else float(row["realizado"])
+                ),
+
+                "projetado": float(
+                    row["projetado"] or 0
+                )
+            })
+
+        return modalidades
 
     def calcular_previsao(serie):
-        meses_com_real = [r["mes"] for r in serie if r["mes"] in ids_meses and r["realizado"] > 0]
-        valores_reais = [r["realizado"] for r in serie if r["mes"] in ids_meses and r["realizado"] > 0]
+        meses_com_real = [
+            r["mes"]
+            for r in serie
+            if r["mes"] in ids_meses and NumberOrZero(r["realizado"]) > 0
+        ]
+
+        valores_reais = [
+            NumberOrZero(r["realizado"])
+            for r in serie
+            if r["mes"] in ids_meses and NumberOrZero(r["realizado"]) > 0
+        ]
 
         previsao = [None] * 12
 
@@ -8990,6 +10577,757 @@ async def performance_preditiva(
                 previsao[i] = int(round(media_real))
 
         return previsao
+    
+    def NumberOrZero(v):
+        try:
+            return float(v or 0)
+        except Exception:
+            return 0
+        
+    async def montar_matriculas_por_modalidade():
+        modalidades = await buscar_serie_modalidade()
+
+        resultado = []
+
+        nomes_campos = [
+            "jan",
+            "fev",
+            "mar",
+            "abr",
+            "mai",
+            "jun",
+            "jul",
+            "ago",
+            "set",
+            "out",
+            "nov",
+            "dez"
+        ]
+
+        # ---------------------------------------------------------
+        # ÚLTIMO MÊS REALIZADO
+        #
+        # Segue exatamente o último mês selecionado no filtro.
+        # Exemplo: meses=1,2,3,4,5,6 -> último mês realizado = 6.
+        # ---------------------------------------------------------
+        ultimo_mes_realizado = (
+            max(ids_meses)
+            if ids_meses
+            else 0
+        )
+
+        for codigo, item in modalidades.items():
+            serie = item["serie"]
+
+            # -----------------------------------------------------
+            # VALORES REALIZADOS DA MODALIDADE ATÉ O ÚLTIMO
+            # MÊS REALIZADO GLOBAL
+            # -----------------------------------------------------
+            mapa_realizado = {
+                int(registro["mes"]): NumberOrZero(
+                    registro["realizado"]
+                )
+                for registro in serie
+            }
+
+            valores_reais = [
+                mapa_realizado.get(mes, 0)
+                for mes in range(
+                    1,
+                    ultimo_mes_realizado + 1
+                )
+            ]
+
+            media_realizada = (
+                sum(valores_reais) / len(valores_reais)
+                if valores_reais
+                else 0
+            )
+
+            meta_anual_modalidade = NumberOrZero(
+                item.get("meta")
+            )
+
+            linha = {
+                "codigo": codigo,
+
+                "modalidade": (
+                    item.get("nome")
+                    or f"Modalidade {codigo}"
+                ),
+
+                "meta": round(meta_anual_modalidade)
+            }
+
+            total = 0
+
+            mapa_serie = {
+                int(registro["mes"]): registro
+                for registro in serie
+            }
+
+            for indice, nome_mes in enumerate(
+                nomes_campos
+            ):
+                mes = indice + 1
+
+                registro = mapa_serie.get(mes)
+
+                realizado = (
+                    registro["realizado"]
+                    if registro
+                    else None
+                )
+
+                projetado_banco = (
+                    NumberOrZero(
+                        registro["projetado"]
+                    )
+                    if registro
+                    else 0
+                )
+
+                # -------------------------------------------------
+                # MESES JÁ REALIZADOS
+                #
+                # Mesmo que a modalidade tenha zero, continua sendo
+                # um mês realizado.
+                # -------------------------------------------------
+                if mes <= ultimo_mes_realizado:
+                    valor = NumberOrZero(realizado)
+                    tipo = "realizado"
+
+                # -------------------------------------------------
+                # MESES FUTUROS
+                # -------------------------------------------------
+                else:
+                    if projetado_banco > 0:
+                        valor = projetado_banco
+
+                    elif media_realizada > 0:
+                        valor = round(media_realizada)
+
+                    else:
+                        valor = 0
+
+                    tipo = (
+                        "projecao"
+                        if valor > 0
+                        else "sem_dado"
+                    )
+
+                linha[nome_mes] = {
+                    "valor": round(valor),
+                    "tipo": tipo
+                }
+
+                total += valor
+
+            linha["total"] = round(total)
+
+            percentual = (
+                total / meta_anual_modalidade * 100
+                if meta_anual_modalidade > 0
+                else 0
+            )
+
+            if meta_anual_modalidade <= 0 and total > 0:
+                status = "sem_meta"
+
+            elif percentual >= 100:
+                status = "atingido"
+
+            elif percentual >= 70:
+                status = "em_risco"
+
+            else:
+                status = "critico"
+
+            linha["percentual"] = round(
+                percentual,
+                1
+            )
+
+            linha["status"] = status
+
+            resultado.append(linha)
+
+        # Retira modalidades totalmente zeradas
+        resultado = [
+            linha
+            for linha in resultado
+            if (
+                NumberOrZero(
+                    linha.get("total")
+                ) > 0
+                or
+                NumberOrZero(
+                    linha.get("meta")
+                ) > 0
+            )
+        ]
+
+        resultado.sort(
+            key=lambda linha: (
+                linha.get("modalidade") or ""
+            ).casefold()
+        )
+
+        return resultado
+    
+    async def montar_hora_aluno_por_modalidade():
+        modalidades = (
+            await buscar_serie_hora_aluno_modalidade()
+        )
+
+        resultado = []
+
+        nomes_campos = [
+            "jan",
+            "fev",
+            "mar",
+            "abr",
+            "mai",
+            "jun",
+            "jul",
+            "ago",
+            "set",
+            "out",
+            "nov",
+            "dez"
+        ]
+
+        ultimo_mes_realizado = (
+            max(ids_meses)
+            if ids_meses
+            else 0
+        )
+
+        for codigo, item in modalidades.items():
+            serie = item["serie"]
+
+            mapa_realizado = {
+                int(registro["mes"]): NumberOrZero(
+                    registro["realizado"]
+                )
+                for registro in serie
+            }
+
+            valores_reais = [
+                mapa_realizado.get(mes, 0)
+                for mes in range(
+                    1,
+                    ultimo_mes_realizado + 1
+                )
+            ]
+
+            media_realizada = (
+                sum(valores_reais) / len(valores_reais)
+                if valores_reais
+                else 0
+            )
+
+            meta_anual_modalidade = NumberOrZero(
+                item.get("meta")
+            )
+
+            linha = {
+                "codigo": codigo,
+
+                "modalidade": (
+                    item.get("nome")
+                    or f"Modalidade {codigo}"
+                ),
+
+                "meta": round(meta_anual_modalidade, 2)
+            }
+
+            total = 0
+
+            mapa_serie = {
+                int(registro["mes"]): registro
+                for registro in serie
+            }
+
+            for indice, nome_mes in enumerate(
+                nomes_campos
+            ):
+                mes = indice + 1
+                registro = mapa_serie.get(mes)
+
+                realizado = (
+                    registro["realizado"]
+                    if registro
+                    else None
+                )
+
+                projetado_banco = (
+                    NumberOrZero(
+                        registro["projetado"]
+                    )
+                    if registro
+                    else 0
+                )
+
+                if mes <= ultimo_mes_realizado:
+                    valor = NumberOrZero(realizado)
+                    tipo = "realizado"
+
+                else:
+                    if projetado_banco > 0:
+                        valor = projetado_banco
+
+                    elif media_realizada > 0:
+                        valor = media_realizada
+
+                    else:
+                        valor = 0
+
+                    tipo = (
+                        "projecao"
+                        if valor > 0
+                        else "sem_dado"
+                    )
+
+                linha[nome_mes] = {
+                    "valor": round(valor, 2),
+                    "tipo": tipo
+                }
+
+                total += valor
+
+            linha["total"] = round(total, 2)
+
+            percentual = (
+                total / meta_anual_modalidade * 100
+                if meta_anual_modalidade > 0
+                else 0
+            )
+
+            if meta_anual_modalidade <= 0 and total > 0:
+                status = "sem_meta"
+
+            elif percentual >= 100:
+                status = "atingido"
+
+            elif percentual >= 70:
+                status = "em_risco"
+
+            else:
+                status = "critico"
+
+            linha["percentual"] = round(
+                percentual,
+                1
+            )
+
+            linha["status"] = status
+
+            resultado.append(linha)
+
+        resultado = [
+            linha
+            for linha in resultado
+            if (
+                NumberOrZero(
+                    linha.get("total")
+                ) > 0
+                or
+                NumberOrZero(
+                    linha.get("meta")
+                ) > 0
+            )
+        ]
+
+        resultado.sort(
+            key=lambda linha: (
+                linha.get("modalidade") or ""
+            ).casefold()
+        )
+
+        return resultado
+    
+    async def montar_receita_por_modalidade():
+        modalidades = (
+            await buscar_serie_receita_modalidade()
+        )
+
+        resultado = []
+
+        nomes_campos = [
+            "jan",
+            "fev",
+            "mar",
+            "abr",
+            "mai",
+            "jun",
+            "jul",
+            "ago",
+            "set",
+            "out",
+            "nov",
+            "dez"
+        ]
+
+        ultimo_mes_realizado = (
+            max(ids_meses)
+            if ids_meses
+            else 0
+        )
+
+        for codigo, item in modalidades.items():
+            serie = item["serie"]
+
+            mapa_realizado = {
+                int(registro["mes"]): NumberOrZero(
+                    registro["realizado"]
+                )
+                for registro in serie
+            }
+
+            valores_reais = [
+                mapa_realizado.get(mes, 0)
+                for mes in range(
+                    1,
+                    ultimo_mes_realizado + 1
+                )
+            ]
+
+            media_realizada = (
+                sum(valores_reais) / len(valores_reais)
+                if valores_reais
+                else 0
+            )
+
+            meta_anual_modalidade = NumberOrZero(
+                item.get("meta")
+            )
+
+            linha = {
+                "codigo": codigo,
+
+                "modalidade": (
+                    item.get("nome")
+                    or f"Modalidade {codigo}"
+                ),
+
+                "meta": round(
+                    meta_anual_modalidade,
+                    2
+                )
+            }
+
+            total = 0
+
+            mapa_serie = {
+                int(registro["mes"]): registro
+                for registro in serie
+            }
+
+            for indice, nome_mes in enumerate(
+                nomes_campos
+            ):
+                mes = indice + 1
+                registro = mapa_serie.get(mes)
+
+                realizado = (
+                    registro["realizado"]
+                    if registro
+                    else None
+                )
+
+                projetado_banco = (
+                    NumberOrZero(
+                        registro["projetado"]
+                    )
+                    if registro
+                    else 0
+                )
+
+                # Meses encerrados: receita realizada
+                if mes <= ultimo_mes_realizado:
+                    valor = NumberOrZero(realizado)
+                    tipo = "realizado"
+
+                # Meses futuros: receita projetada
+                else:
+                    if projetado_banco > 0:
+                        valor = projetado_banco
+
+                    elif media_realizada > 0:
+                        valor = media_realizada
+
+                    else:
+                        valor = 0
+
+                    tipo = (
+                        "projecao"
+                        if valor > 0
+                        else "sem_dado"
+                    )
+
+                linha[nome_mes] = {
+                    "valor": round(valor, 2),
+                    "tipo": tipo
+                }
+
+                total += valor
+
+            linha["total"] = round(total, 2)
+
+            percentual = (
+                total / meta_anual_modalidade * 100
+                if meta_anual_modalidade > 0
+                else 0
+            )
+
+            if (
+                meta_anual_modalidade <= 0
+                and total > 0
+            ):
+                status = "sem_meta"
+
+            elif percentual >= 100:
+                status = "atingido"
+
+            elif percentual >= 70:
+                status = "em_risco"
+
+            else:
+                status = "critico"
+
+            linha["percentual"] = round(
+                percentual,
+                1
+            )
+
+            linha["status"] = status
+
+            resultado.append(linha)
+
+        resultado = [
+            linha
+            for linha in resultado
+            if (
+                NumberOrZero(
+                    linha.get("total")
+                ) > 0
+                or
+                NumberOrZero(
+                    linha.get("meta")
+                ) > 0
+            )
+        ]
+
+        resultado.sort(
+            key=lambda linha: (
+                linha.get("modalidade") or ""
+            ).casefold()
+        )
+
+        return resultado
+
+    async def buscar_receita_contratada(serie_receita):
+        # Primeiro mês selecionado em que a receita realizada está zerada
+        previsao_receita = calcular_previsao(serie_receita)
+
+        meses_com_previsao = [
+            i + 1
+            for i, v in enumerate(previsao_receita)
+            if v is not None
+        ]
+
+        if not meses_com_previsao:
+            return [0] * 12
+
+        primeiro_mes_zerado = min(meses_com_previsao)
+
+        params = [ano, primeiro_mes_zerado]
+        idx = 3
+
+        filtro_sub = ""
+        filtro_prog = ""
+        filtro_regiao = ""
+
+        if ids_sub:
+            filtro_sub = f" AND u.cod_subregiao = ANY(${idx}::int[])"
+            params.append(ids_sub)
+            idx += 1
+
+        if regiao:
+            filtro_regiao = f"""
+                AND EXISTS (
+                    SELECT 1
+                    FROM subregioes sr
+                    JOIN regioes rg ON rg.codigo = sr.codigo_regiao
+                    WHERE sr.codigo = u.cod_subregiao
+                    AND UPPER(TRIM(rg.nome)) = UPPER(TRIM(${idx}))
+                )
+            """
+            params.append(regiao)
+            idx += 1
+
+        if ids_prog_txt:
+            filtro_prog = f" AND TRIM(COALESCE(t.cod_programa::text, '')) = ANY(${idx}::text[])"
+            params.append(ids_prog_txt)
+            idx += 1
+
+        sql = f"""
+        WITH RECURSIVE meses AS (
+            SELECT generate_series(1, 12) AS mes
+        ),
+        base AS (
+            SELECT
+                l.codturma,
+                l.valor_liquido,
+                l.qtd_parcelas,
+                l.qtd_matriculados,
+                l.qtd_periodos,
+                l.modulo_atual,
+                l.dtinicial::date AS dtinicial,
+                l.dtfinal::date AS dtfinal,
+                t.cod_modalidade,
+                u.cod_subregiao,
+                t.cod_programa
+            FROM importacao_contratos_pf_linhas l
+            JOIN turmas t
+            ON TRIM(UPPER(t.codigo_sge)) = TRIM(UPPER(l.codturma))
+            JOIN uo u
+            ON u.codigo = t.cod_uo
+            WHERE l.status IN ('RESOLVIDO', 'FORA_ESCOPO')
+
+            AND NOT (
+                t.cod_modalidade = 15
+                AND COALESCE(l.modulo_atual, 0) <> 1
+            )
+
+            {filtro_sub}
+            {filtro_regiao}
+            {filtro_prog}
+        ),
+        periodos_virtuais AS (
+            SELECT
+                b.codturma,
+                b.valor_liquido,
+                b.qtd_parcelas,
+                b.qtd_matriculados,
+                b.qtd_periodos,
+                b.modulo_atual,
+                b.dtinicial,
+                b.dtfinal,
+                b.cod_modalidade,
+                b.cod_subregiao,
+                b.cod_programa,
+                1 AS periodo_virtual,
+                b.dtinicial AS inicio_periodo,
+                (
+                    b.dtinicial
+                    + INTERVAL '6 months'
+                    + CASE
+                        WHEN EXTRACT(MONTH FROM b.dtinicial)::int BETWEEN 7 AND 12
+                        THEN INTERVAL '1 month'
+                        ELSE INTERVAL '0 month'
+                    END
+                )::date AS fim_periodo
+            FROM base b
+            WHERE b.cod_modalidade = 15
+
+            UNION ALL
+
+            SELECT
+                pv.codturma,
+                pv.valor_liquido,
+                pv.qtd_parcelas,
+                pv.qtd_matriculados,
+                pv.qtd_periodos,
+                pv.modulo_atual,
+                pv.dtinicial,
+                pv.dtfinal,
+                pv.cod_modalidade,
+                pv.cod_subregiao,
+                pv.cod_programa,
+                pv.periodo_virtual + 1,
+                (pv.fim_periodo + INTERVAL '1 day')::date AS inicio_periodo,
+                (
+                    (pv.fim_periodo + INTERVAL '1 day')::date
+                    + INTERVAL '6 months'
+                    + CASE
+                        WHEN EXTRACT(MONTH FROM (pv.fim_periodo + INTERVAL '1 day')::date)::int BETWEEN 7 AND 12
+                        THEN INTERVAL '1 month'
+                        ELSE INTERVAL '0 month'
+                    END
+                )::date AS fim_periodo
+            FROM periodos_virtuais pv
+            WHERE pv.periodo_virtual < COALESCE(pv.qtd_periodos, 0)::int
+        ),
+        contratos AS (
+            SELECT
+                m.mes,
+                SUM(
+                    ROUND(
+                        (
+                            COALESCE(b.valor_liquido, 0)
+                            / NULLIF(COALESCE(b.qtd_parcelas, 0), 0)
+                        )::numeric,
+                        2
+                    )
+                    * COALESCE(b.qtd_matriculados, 0)
+                ) AS valor
+            FROM meses m
+            JOIN base b
+            ON b.cod_modalidade <> 15
+            AND b.dtinicial <= (
+                MAKE_DATE($1, m.mes, 1)
+                + INTERVAL '1 month'
+                - INTERVAL '1 day'
+            )
+            AND b.dtfinal >= MAKE_DATE($1, m.mes, 1)
+            WHERE m.mes >= $2
+            GROUP BY m.mes
+
+            UNION ALL
+
+            SELECT
+                m.mes,
+                SUM(
+                    ROUND(
+                        (
+                            COALESCE(pv.valor_liquido, 0)
+                            / NULLIF(COALESCE(pv.qtd_parcelas, 0), 0)
+                        )::numeric,
+                        2
+                    )
+                    * COALESCE(pv.qtd_matriculados, 0)
+                ) AS valor
+            FROM meses m
+            JOIN periodos_virtuais pv
+            ON pv.inicio_periodo <= (
+                MAKE_DATE($1, m.mes, 1)
+                + INTERVAL '1 month'
+                - INTERVAL '1 day'
+            )
+            AND pv.fim_periodo >= MAKE_DATE($1, m.mes, 1)
+            WHERE m.mes >= $2
+            GROUP BY m.mes
+        )
+        SELECT
+            m.mes,
+            COALESCE(SUM(c.valor), 0) AS valor
+        FROM meses m
+        LEFT JOIN contratos c ON c.mes = m.mes
+        GROUP BY m.mes
+        ORDER BY m.mes
+        """
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+
+        mapa = {int(r["mes"]): float(r["valor"] or 0) for r in rows}
+
+        return [
+            round(mapa.get(mes, 0), 2)
+            for mes in range(1, 13)
+        ]
 
     async def montar_indicador(indicador: str):
         serie = await buscar_serie(indicador)
@@ -8998,7 +11336,7 @@ async def performance_preditiva(
         realizado = []
         for r in serie:
             if r["mes"] in ids_meses:
-                realizado.append(round(r["realizado"], 2))
+                realizado.append(None if r["realizado"] is None else round(r["realizado"], 2))
             else:
                 realizado.append(None)
 
@@ -9010,11 +11348,40 @@ async def performance_preditiva(
             "previsao": previsao,
         }
 
+    matriculas = await montar_indicador("matriculas")
+    hora_aluno = await montar_indicador("hora_aluno")
+    receita = await montar_indicador("receita")
+    matriculas_modalidade = (
+        await montar_matriculas_por_modalidade()
+    )
+
+    hora_aluno_modalidade = (
+        await montar_hora_aluno_por_modalidade()
+    )
+
+    receita_modalidade = (
+        await montar_receita_por_modalidade()
+    )
+
+    serie_receita = await buscar_serie("receita")
+    receita_contratada = await buscar_receita_contratada(serie_receita)
+
+    receita["contratada"] = receita_contratada
+
     return {
         "meses": nomes_meses,
-        "matriculas": await montar_indicador("matriculas"),
-        "hora_aluno": await montar_indicador("hora_aluno"),
-        "receita": await montar_indicador("receita"),
+        "matriculas": matriculas,
+        "hora_aluno": hora_aluno,
+        "receita": receita,
+
+        "matriculas_modalidade":
+            matriculas_modalidade,
+        
+        "hora_aluno_modalidade":
+            hora_aluno_modalidade,
+        
+        "receita_modalidade":
+            receita_modalidade,
     }
 
 @router.get("/planejamento/filtros/subregioes-por-programa")
@@ -13583,8 +15950,14 @@ async def processar_data(request: Request, lote_id: int):
                 WHERE ds.lote_id = $1
                 AND ds.codigo_curso IS NOT NULL
                 AND TRIM(ds.codigo_curso) <> ''
+                AND UPPER(TRIM(ds.codigo_curso)) NOT IN (
+                    'NAN', 'NAT', 'NONE', 'NULL'
+                )
                 AND ds.curso IS NOT NULL
                 AND TRIM(ds.curso) <> ''
+                AND UPPER(TRIM(ds.curso)) NOT IN (
+                    'NAN', 'NAT', 'NONE', 'NULL'
+                )
                 AND c.codigo IS NULL
                 GROUP BY TRIM(ds.codigo_curso)
                 """,
@@ -13645,10 +16018,22 @@ async def processar_data(request: Request, lote_id: int):
                 """)
             }
             
+            valores_invalidos_curso = {
+                "",
+                "NAN",
+                "NAT",
+                "NONE",
+                "NULL",
+            }
+
             codigos_curso = sorted({
                 str(r["codigo_curso"]).strip()
                 for r in rows
-                if r["codigo_curso"] is not None and str(r["codigo_curso"]).strip()
+                if (
+                    r["codigo_curso"] is not None
+                    and str(r["codigo_curso"]).strip().upper()
+                    not in valores_invalidos_curso
+                )
             })
 
             curso_map = {}
@@ -13687,15 +16072,30 @@ async def processar_data(request: Request, lote_id: int):
                 if not codigo_sge:
                     continue
 
-                ano_referencia = r["data_matricula"].year if r["data_matricula"] else None
+                ano_referencia = r["data_inicio"].year if r["data_inicio"] else None
                 mes_referencia = r["data_matricula"].month if r["data_matricula"] else None
                 cod_uo = None
                 
                 cod_curso = None
                 cod_programa = None
 
-                codigo_curso_norm = str(r["codigo_curso"]).strip() if r["codigo_curso"] else None
-                curso_info = curso_map.get(codigo_curso_norm) if codigo_curso_norm else None
+                codigo_curso_norm = (
+                    str(r["codigo_curso"]).strip()
+                    if r["codigo_curso"] is not None
+                    else None
+                )
+
+                if (
+                    not codigo_curso_norm
+                    or codigo_curso_norm.upper() in valores_invalidos_curso
+                ):
+                    codigo_curso_norm = None
+
+                curso_info = (
+                    curso_map.get(codigo_curso_norm)
+                    if codigo_curso_norm
+                    else None
+                )
 
                 if r["cod_unidade"]:
                     try:
@@ -13736,16 +16136,39 @@ async def processar_data(request: Request, lote_id: int):
 
                 valor_formato = (r["formato"] or "").strip().upper()
 
-                if "SEMIPRESENCIAL" in valor_formato or "SEMI" in valor_formato:
+                # Remove acentos para facilitar a comparação
+                valor_formato_normalizado = (
+                    valor_formato
+                    .replace("Á", "A")
+                    .replace("À", "A")
+                    .replace("Â", "A")
+                    .replace("Ã", "A")
+                    .replace("É", "E")
+                    .replace("Ê", "E")
+                    .replace("Í", "I")
+                    .replace("Ó", "O")
+                    .replace("Ô", "O")
+                    .replace("Õ", "O")
+                    .replace("Ú", "U")
+                    .replace("Ç", "C")
+                )
+
+                if "SEMIPRESENCIAL" in valor_formato_normalizado or "SEMI" in valor_formato_normalizado:
                     cod_formato = 6
-                elif "PRESENCIAL DUAL" in valor_formato or "DUAL" in valor_formato:
+
+                elif "PRESENCIAL DUAL" in valor_formato_normalizado or "DUAL" in valor_formato_normalizado:
                     cod_formato = 7
-                elif "EDUCAÇÃO A DISTÂNCIA" in valor_formato or "EDUCACAO A DISTANCIA" in valor_formato or "EAD" in valor_formato:
+
+                elif (
+                    "DISTANCIA" in valor_formato_normalizado
+                    or valor_formato_normalizado == "EAD"
+                ):
                     cod_formato = 5
-                elif "PRESENCIAL" in valor_formato:
+
+                elif "PRESENCIAL" in valor_formato_normalizado:
                     cod_formato = 4
-                
-                if cod_formato is None:
+
+                else:
                     cod_formato = 99
 
                 cod_turno = None
@@ -13757,6 +16180,11 @@ async def processar_data(request: Request, lote_id: int):
 
                 cod_turma = turmas_existentes.get(codigo_sge)
 
+                curso_anterior_buffer = turmas_update_buffer.get(codigo_sge)
+
+                if cod_curso is None and curso_anterior_buffer:
+                    cod_curso = curso_anterior_buffer[3]
+                
                 if cod_turma:
                     turmas_update_buffer[codigo_sge] = (
                         codigo_sge,
@@ -13831,8 +16259,8 @@ async def processar_data(request: Request, lote_id: int):
                     """
                     UPDATE turmas
                     SET cod_uo = $2,
-                        cod_programa = $3,
-                        cod_curso = $4,
+                        cod_programa = COALESCE($3, cod_programa),
+                        cod_curso = COALESCE($4, cod_curso),
                         cod_modalidade = $5,
                         cod_formato = $6,
                         cod_turno = $7,
@@ -14039,62 +16467,15 @@ async def processar_data(request: Request, lote_id: int):
                     """,
                     movimentos_finais
                 )
-            
-            status_resumo_buffer = {}
 
-            for r in rows:
-                codigo_sge = (r["turma"] or "").strip()
-                if not codigo_sge:
-                    continue
+            # O data.xlsx representa uma carga completa.
+            # Substituímos integralmente os detalhes da carga anterior.
+            await conn.execute(
+                """
+                TRUNCATE TABLE sge_turma_detalhe_alunos RESTART IDENTITY
+                """
+            )
 
-                cod_turma = turmas_existentes.get(codigo_sge)
-                if not cod_turma:
-                    continue
-
-                if cod_turma not in status_resumo_buffer:
-                    status_resumo_buffer[cod_turma] = {
-                        "matriculados": 0,
-                        "pre_matriculados": 0,
-                        "cancelados": 0,
-                        "desistentes": 0,
-                        "evadidos": 0,
-                        "falecidos": 0,
-                    }
-
-                status_resumo_buffer[cod_turma]["matriculados"] += r["matriculados"] or 0
-                status_resumo_buffer[cod_turma]["pre_matriculados"] += r["pre_matriculados"] or 0
-                status_resumo_buffer[cod_turma]["cancelados"] += r["cancelados"] or 0
-                status_resumo_buffer[cod_turma]["desistentes"] += r["desistentes"] or 0
-                status_resumo_buffer[cod_turma]["evadidos"] += r["evadidos"] or 0
-                status_resumo_buffer[cod_turma]["falecidos"] += r["falecidos"] or 0
-
-            status_resumo_rows = [
-                (
-                    cod_turma,
-                    vals["matriculados"],
-                    vals["pre_matriculados"],
-                    vals["cancelados"],
-                    vals["desistentes"],
-                    vals["evadidos"],
-                    vals["falecidos"],
-                )
-                for cod_turma, vals in status_resumo_buffer.items()
-            ]
-
-            codigos_turma_processados = [
-                codigo
-                for codigo in turmas_existentes.values()
-            ]
-
-            if codigos_turma_processados:
-                await conn.execute(
-                    """
-                    DELETE FROM sge_turma_detalhe_alunos
-                    WHERE lote_id = $1
-                    """,
-                    lote_id
-                )
-            
             if detalhe_alunos_rows:
                 await conn.executemany(
                     """
@@ -14112,37 +16493,72 @@ async def processar_data(request: Request, lote_id: int):
                         data_fim_contratoapr,
                         hash_linha
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    VALUES (
+                        $1, $2, $3, $4, $5, $6,
+                        $7, $8, $9, $10, $11, $12
+                    )
                     """,
                     detalhe_alunos_rows
                 )
 
-            if status_resumo_rows:
-                await conn.executemany(
-                    """
-                    INSERT INTO turmas_status_resumo (
-                        cod_turma,
-                        matriculados,
-                        pre_matriculados,
-                        cancelados,
-                        desistentes,
-                        evadidos,
-                        falecidos,
-                        atualizado_em
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
-                    ON CONFLICT (cod_turma)
-                    DO UPDATE SET
-                        matriculados = EXCLUDED.matriculados,
-                        pre_matriculados = EXCLUDED.pre_matriculados,
-                        cancelados = EXCLUDED.cancelados,
-                        desistentes = EXCLUDED.desistentes,
-                        evadidos = EXCLUDED.evadidos,
-                        falecidos = EXCLUDED.falecidos,
-                        atualizado_em = CURRENT_TIMESTAMP
-                    """,
-                    status_resumo_rows
+            # Atualiza os quantitativos de alunos usando somente
+            # o snapshot mais recente de cada turma.
+            await conn.execute(
+                """
+                WITH ultimo_snapshot AS (
+                    SELECT DISTINCT ON (UPPER(TRIM(s.cod_turma)))
+                        UPPER(TRIM(s.cod_turma)) AS codigo_sge,
+                        COALESCE(s.qtd_matriculado, 0) AS matriculados,
+                        COALESCE(s.qtd_pre_matriculado, 0) AS pre_matriculados,
+                        COALESCE(s.qtd_cancelado, 0) AS cancelados,
+                        COALESCE(s.qtd_desistente, 0) AS desistentes,
+                        COALESCE(s.qtd_evadido, 0) AS evadidos
+                    FROM sge_matriculas_snapshot s
+                    ORDER BY
+                        UPPER(TRIM(s.cod_turma)),
+                        s.lote_id DESC,
+                        s.id DESC
                 )
+                INSERT INTO turmas_status_resumo (
+                    cod_turma,
+                    matriculados,
+                    pre_matriculados,
+                    cancelados,
+                    desistentes,
+                    evadidos,
+                    falecidos,
+                    atualizado_em
+                )
+                SELECT
+                    t.codigo,
+                    us.matriculados,
+                    us.pre_matriculados,
+                    us.cancelados,
+                    us.desistentes,
+                    us.evadidos,
+                    COALESCE(tsr.falecidos, 0),
+                    CURRENT_TIMESTAMP
+                FROM ultimo_snapshot us
+
+                JOIN turmas t
+                    ON UPPER(TRIM(t.codigo_sge)) = us.codigo_sge
+
+                LEFT JOIN turmas_status_resumo tsr
+                    ON tsr.cod_turma = t.codigo
+
+                WHERE t.codigo_sge = ANY($1::text[])
+
+                ON CONFLICT (cod_turma)
+                DO UPDATE SET
+                    matriculados = EXCLUDED.matriculados,
+                    pre_matriculados = EXCLUDED.pre_matriculados,
+                    cancelados = EXCLUDED.cancelados,
+                    desistentes = EXCLUDED.desistentes,
+                    evadidos = EXCLUDED.evadidos,
+                    atualizado_em = CURRENT_TIMESTAMP
+                """,
+                codigos_sge
+            )
 
             await conn.execute(
                 """
@@ -14725,6 +17141,391 @@ async def auth_atualizar_usuario(
         """, nome, email, perfil_id, ativo, usuario_id)
 
     return {"ok": True, "mensagem": "Usuário atualizado com sucesso."}
+
+@router.post("/importacoes/contratos-pf")
+async def importar_contratos_pf(request: Request, arquivo: UploadFile = File(...)):
+    if not arquivo.filename:
+        raise HTTPException(status_code=400, detail="Arquivo não informado.")
+
+    nome = arquivo.filename.lower()
+    if not (nome.endswith(".xlsx") or nome.endswith(".xls")):
+        raise HTTPException(status_code=400, detail="Envie um arquivo Excel .xlsx ou .xls.")
+
+    conteudo = await arquivo.read()
+
+    try:
+        df = pd.read_excel(io.BytesIO(conteudo))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Erro ao ler Excel: {e}")
+
+    df.columns = [str(c).replace("\xa0", " ").strip().upper() for c in df.columns]
+
+    obrigatorias = [
+        "CODFILIAL",
+        "NOME_FILIAL",
+        "CODTURMA",
+        "DTINICIAL",
+        "DTFINAL",
+        "QTD_CONTRATOS",
+        "VALOR_LIQUIDO",
+    ]
+
+    faltantes = [c for c in obrigatorias if c not in df.columns]
+    if faltantes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Colunas obrigatórias ausentes no Excel: {', '.join(faltantes)}"
+        )
+
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            lote = await conn.fetchrow(
+                """
+                INSERT INTO importacao_contratos_pf_lotes (
+                    nome_arquivo, status, linhas_importadas, validas, invalidas, processadas
+                )
+                VALUES ($1, 'IMPORTADO', 0, 0, 0, 0)
+                RETURNING id
+                """,
+                arquivo.filename,
+            )
+
+            lote_id = lote["id"]
+            registros = []
+            validas = 0
+            invalidas = 0
+
+            for idx, row in df.iterrows():
+                linha = idx + 2
+                erros = []
+
+                codfilial = None
+                nome_filial = norm_text(row.get("NOME_FILIAL"))
+                codturma = norm_text(row.get("CODTURMA"))
+
+                try:
+                    codfilial = norm_int(row.get("CODFILIAL"))
+                    if codfilial is None:
+                        erros.append("CODFILIAL não informado")
+                except Exception:
+                    erros.append("CODFILIAL inválido")
+
+                if not nome_filial:
+                    erros.append("NOME_FILIAL não informado")
+
+                if not codturma:
+                    erros.append("CODTURMA não informado")
+
+                status = "PENDENTE" if not erros else "ERRO"
+
+                if status == "PENDENTE":
+                    validas += 1
+                else:
+                    invalidas += 1
+
+                registros.append((
+                    lote_id,
+                    linha,
+                    codfilial,
+                    nome_filial,
+                    codturma,
+                    norm_int(row.get("ID_MATRIZ_APLICADA")) if not pd.isna(row.get("ID_MATRIZ_APLICADA")) else None,
+                    norm_decimal(row.get("CH_CURSO")),
+                    norm_decimal(row.get("DIAS_SEMANA")),
+                    norm_decimal(row.get("CH_DIARIA_MEDIA")),
+                    norm_date(row.get("DTINICIAL")),
+                    norm_date(row.get("DTFINAL")),
+                    norm_int(row.get("MODULO_ATUAL")) if not pd.isna(row.get("MODULO_ATUAL")) else None,
+                    norm_decimal(row.get("QTD_MESES_TURMA")),
+                    norm_decimal(row.get("QTD_MATRICULADOS")),
+                    norm_decimal(row.get("QTD_PERIODOS")),
+                    norm_decimal(row.get("QTD_CONTRATOS")),
+                    norm_decimal(row.get("QTD_PARCELAS")),
+                    norm_decimal(row.get("VALOR_PARCELAS")),
+                    norm_decimal(row.get("VALOR_LIQUIDO")),
+                    status,
+                    "; ".join(erros) if erros else None,
+                ))
+
+            if registros:
+                await conn.executemany(
+                    """
+                    INSERT INTO importacao_contratos_pf_linhas (
+                        lote_id, linha_excel, codfilial, nome_filial, codturma,
+                        id_matriz_aplicada, ch_curso, dias_semana, ch_diaria_media,
+                        dtinicial, dtfinal, modulo_atual, qtd_meses_turma,
+                        qtd_matriculados, qtd_periodos, qtd_contratos, qtd_parcelas,
+                        valor_parcelas, valor_liquido, status, erro
+                    )
+                    VALUES (
+                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+                        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21
+                    )
+                    """,
+                    registros
+                )
+
+            await conn.execute(
+                """
+                UPDATE importacao_contratos_pf_lotes
+                SET linhas_importadas = $2,
+                    validas = $3,
+                    invalidas = $4
+                WHERE id = $1
+                """,
+                lote_id,
+                len(registros),
+                validas,
+                invalidas
+            )
+
+    return {
+        "ok": True,
+        "lote_id": lote_id,
+        "arquivo": arquivo.filename,
+        "linhas_importadas": len(registros),
+        "validas": validas,
+        "invalidas": invalidas,
+    }
+
+@router.post("/importacoes/contratos-pf/processar/{lote_id}")
+async def processar_contratos_pf(request: Request, lote_id: int):
+    pool = request.app.state.pool
+    batch_size = 200
+
+    async with pool.acquire() as conn:
+        lote = await conn.fetchrow(
+            """
+            SELECT *
+            FROM importacao_contratos_pf_lotes
+            WHERE id = $1
+            """,
+            lote_id
+        )
+
+        if not lote:
+            raise HTTPException(status_code=404, detail="Lote não encontrado.")
+
+        await conn.execute(
+            """
+            UPDATE importacao_contratos_pf_lotes
+            SET status = 'PROCESSANDO',
+                processado_em = NULL
+            WHERE id = $1
+            """,
+            lote_id
+        )
+
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM importacao_contratos_pf_linhas
+            WHERE lote_id = $1
+              AND status = 'PENDENTE'
+            ORDER BY id
+            LIMIT $2
+            """,
+            lote_id,
+            batch_size
+        )
+
+        if not rows:
+            processadas = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM importacao_contratos_pf_linhas
+                WHERE lote_id = $1
+                  AND status IN ('RESOLVIDO', 'ERRO', 'FORA_ESCOPO')
+                """,
+                lote_id
+            )
+
+            erros_total = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM importacao_contratos_pf_linhas
+                WHERE lote_id = $1
+                  AND status = 'ERRO'
+                """,
+                lote_id
+            )
+
+            status_final = "PROCESSADO"
+            if (erros_total or 0) > 0:
+                status_final = "PROCESSADO_COM_ERRO"
+
+            await conn.execute(
+                """
+                UPDATE importacao_contratos_pf_lotes
+                SET status = $2,
+                    processadas = $3,
+                    processado_em = NOW()
+                WHERE id = $1
+                """,
+                lote_id,
+                status_final,
+                processadas
+            )
+
+            return {
+                "ok": True,
+                "lote_id": lote_id,
+                "linhas_avaliadas": 0,
+                "atualizadas": 0,
+                "criadas_uo": 0,
+                "erros": 0
+            }
+
+        atualizadas = 0
+        criadas_uo = 0
+        erros = 0
+
+        for r in rows:
+            try:
+                codfilial = r["codfilial"]
+                nome_filial = r["nome_filial"]
+                codturma = r["codturma"]
+
+                uo = await conn.fetchrow(
+                    """
+                    SELECT codigo
+                    FROM uo
+                    WHERE codigo_sge = $1
+                    """,
+                    codfilial
+                )
+
+                if not uo:
+                    uo = await conn.fetchrow(
+                        """
+                        INSERT INTO uo (
+                            codigo_sge,
+                            nome
+                        )
+                        VALUES ($1, $2)
+                        RETURNING codigo
+                        """,
+                        codfilial,
+                        nome_filial
+                    )
+                    criadas_uo += 1
+                else:
+                    await conn.execute(
+                        """
+                        UPDATE uo
+                        SET nome = COALESCE($2, nome)
+                        WHERE codigo = $1
+                        """,
+                        uo["codigo"],
+                        nome_filial
+                    )
+
+                turma = await conn.fetchrow(
+                    """
+                    SELECT codigo
+                    FROM turmas
+                    WHERE TRIM(UPPER(codigo_sge)) = TRIM(UPPER($1))
+                    """,
+                    codturma
+                )
+
+                if not turma:
+                    if r["dtfinal"] and r["dtfinal"] < date(2026, 1, 1):
+                        await conn.execute(
+                            """
+                            UPDATE importacao_contratos_pf_linhas
+                            SET status = 'FORA_ESCOPO',
+                                processado = TRUE,
+                                erro = 'Turma não encontrada em turmas porque DTFINAL é anterior a 01/01/2026.'
+                            WHERE id = $1
+                            """,
+                            r["id"]
+                        )
+                        continue
+
+                    await conn.execute(
+                        """
+                        UPDATE importacao_contratos_pf_linhas
+                        SET status = 'ERRO',
+                            erro = 'Turma não encontrada na tabela turmas pelo CODTURMA.'
+                        WHERE id = $1
+                        """,
+                        r["id"]
+                    )
+                    erros += 1
+                    continue
+
+                await conn.execute(
+                    """
+                    UPDATE turmas
+                    SET cod_uo = $2,
+                        data_ini_contratoapr = COALESCE($3, data_ini_contratoapr),
+                        data_fim_contratoapr = COALESCE($4, data_fim_contratoapr),
+                        data_atualizacao = NOW()
+                    WHERE codigo = $1
+                    """,
+                    turma["codigo"],
+                    uo["codigo"],
+                    r["dtinicial"],
+                    r["dtfinal"]
+                )
+
+                await conn.execute(
+                    """
+                    UPDATE importacao_contratos_pf_linhas
+                    SET status = 'RESOLVIDO',
+                        processado = TRUE,
+                        erro = NULL
+                    WHERE id = $1
+                    """,
+                    r["id"]
+                )
+
+                atualizadas += 1
+
+            except Exception as e:
+                await conn.execute(
+                    """
+                    UPDATE importacao_contratos_pf_linhas
+                    SET status = 'ERRO',
+                        erro = $2
+                    WHERE id = $1
+                    """,
+                    r["id"],
+                    str(e)
+                )
+                erros += 1
+
+        processadas = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM importacao_contratos_pf_linhas
+            WHERE lote_id = $1
+              AND status IN ('RESOLVIDO', 'ERRO', 'FORA_ESCOPO')
+            """,
+            lote_id
+        )
+
+        await conn.execute(
+            """
+            UPDATE importacao_contratos_pf_lotes
+            SET processadas = $2
+            WHERE id = $1
+            """,
+            lote_id,
+            processadas
+        )
+
+    return {
+        "ok": True,
+        "lote_id": lote_id,
+        "linhas_avaliadas": len(rows),
+        "atualizadas": atualizadas,
+        "criadas_uo": criadas_uo,
+        "erros": erros
+    }
 
 @router.post("/importacoes/cotas")
 async def importar_cotas(request: Request, arquivo: UploadFile = File(...)):
@@ -16166,24 +18967,66 @@ async def executivo_subregioes_periodos(request: Request):
     ]
 
 @router.get("/executivo/subregioes/lista")
-async def executivo_subregioes_lista(request: Request):
+async def executivo_subregioes_lista(
+    request: Request,
+    regioes: str | None = None
+):
     pool = request.app.state.pool
 
-    sql = """
-        SELECT
-            codigo,
-            nome
-        FROM subregioes
-        ORDER BY nome ASC
+    params = []
+    filtros = [
+        "s.nome IS NOT NULL",
+        "TRIM(s.nome) <> ''"
+    ]
+
+    if regioes:
+        nomes_regioes = [
+            nome.strip()
+            for nome in regioes.split(",")
+            if nome.strip()
+        ]
+
+        if nomes_regioes:
+            params.append(nomes_regioes)
+
+            filtros.append(
+                f"""
+                UPPER(TRIM(r.nome)) =
+                ANY(
+                    ARRAY(
+                        SELECT UPPER(TRIM(valor))
+                        FROM UNNEST(${len(params)}::text[]) AS valor
+                    )
+                )
+                """
+            )
+
+    sql = f"""
+        SELECT DISTINCT
+            s.codigo,
+            s.nome,
+            r.nome AS regiao
+
+        FROM subregioes s
+
+        JOIN regioes r
+          ON r.codigo = s.codigo_regiao
+
+        WHERE {' AND '.join(filtros)}
+
+        ORDER BY
+            r.nome,
+            s.nome
     """
 
     async with pool.acquire() as conn:
-        rows = await conn.fetch(sql)
+        rows = await conn.fetch(sql, *params)
 
     return [
         {
             "codigo": r["codigo"],
-            "nome": r["nome"]
+            "nome": r["nome"],
+            "regiao": r["regiao"]
         }
         for r in rows
     ]
@@ -16433,6 +19276,21 @@ async def gerar_relatorio(
                 "orientacao": payload.orientacao,
                 "preview": preview
             }
+        
+        if payload.tipo == "desempenho_programa":
+            preview = await montar_preview_relatorio_desempenho_programa(
+                conn,
+                payload.filtros,
+                payload.opcoes
+            )
+
+            return {
+                "ok": True,
+                "tipo": payload.tipo,
+                "formato": payload.formato,
+                "orientacao": payload.orientacao,
+                "preview": preview
+            }
 
     raise HTTPException(
         status_code=400,
@@ -16454,6 +19312,24 @@ async def gerar_relatorio_pdf(
                 payload.filtros,
                 payload.opcoes
             )
+
+            import json
+
+            print("\n========== PAYLOAD RELATÓRIO ==========")
+            print(json.dumps(
+                payload.model_dump(),
+                ensure_ascii=False,
+                indent=2,
+                default=str
+            ))
+
+            print("\n========== PREVIEW RELATÓRIO ==========")
+            print(json.dumps(
+                preview,
+                ensure_ascii=False,
+                indent=2,
+                default=str
+            ))
 
             pdf = gerar_pdf_relatorio_executivo(
                 preview,
@@ -16491,6 +19367,67 @@ async def gerar_relatorio_pdf(
                 )
 
             nome_arquivo = f"RelatorioExecutivo_{ano}_{periodo}.pdf"
+
+            return StreamingResponse(
+                pdf,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition":
+                    f'inline; filename="{nome_arquivo}"'
+                }
+            )
+        
+        if payload.tipo == "desempenho_programa":
+            preview = await montar_preview_relatorio_desempenho_programa(
+                conn,
+                payload.filtros,
+                payload.opcoes
+            )
+
+            pdf = gerar_pdf_relatorio_desempenho_programa(
+                preview,
+                payload.orientacao
+            )
+
+            ano = payload.filtros.ano or "ano"
+            meses = payload.filtros.meses or []
+
+            nomes_meses = {
+                1: "Jan",
+                2: "Fev",
+                3: "Mar",
+                4: "Abr",
+                5: "Mai",
+                6: "Jun",
+                7: "Jul",
+                8: "Ago",
+                9: "Set",
+                10: "Out",
+                11: "Nov",
+                12: "Dez",
+            }
+
+            if not meses:
+                periodo = "Anual"
+
+            elif len(meses) == 1:
+                periodo = nomes_meses.get(
+                    meses[0],
+                    str(meses[0])
+                )
+
+            else:
+                meses_ordenados = sorted(meses)
+
+                periodo = (
+                    f"{nomes_meses.get(meses_ordenados[0], meses_ordenados[0])}-"
+                    f"{nomes_meses.get(meses_ordenados[-1], meses_ordenados[-1])}"
+                )
+
+            nome_arquivo = (
+                f"RelatorioDesempenhoPrograma_"
+                f"{ano}_{periodo}.pdf"
+            )
 
             return StreamingResponse(
                 pdf,
@@ -16728,17 +19665,59 @@ async def listar_turmas_executivo(
             for linha in linhas
         ]
 
-        kpis_sql = """
-            SELECT
-                COALESCE(SUM(rp.matriculas_real), 0) AS alunos_periodo,
-                COALESCE(SUM(tur.vagas_periodo), 0) AS vagas_periodo
-            FROM realizado_programas rp
+        kpis_where = []
+        kpis_params = []
+        kidx = 1
 
-            JOIN ofertas_programas o
-                ON o.codigo = rp.cod_oferta
+        if ano:
+            kpis_where.append(f"t.ano_referencia = ${kidx}")
+            kpis_params.append(ano)
+            kidx += 1
+
+        if meses_lista:
+            kpis_where.append(
+                f"EXTRACT(MONTH FROM t.data_inicio)::int = ANY(${kidx}::int[])"
+            )
+            kpis_params.append(meses_lista)
+            kidx += 1
+
+        if regiao:
+            kpis_where.append(f"r.nome = ${kidx}")
+            kpis_params.append(regiao)
+            kidx += 1
+
+        if subregiao:
+            kpis_where.append(f"s.nome = ${kidx}")
+            kpis_params.append(subregiao)
+            kidx += 1
+
+        if uo:
+            kpis_where.append(f"u.nome = ${kidx}")
+            kpis_params.append(uo)
+            kidx += 1
+
+        kpis_where.append("""
+            (
+                COALESCE(t.data_fim, t.data_fim_contratoapr) IS NULL
+                OR COALESCE(t.data_fim, t.data_fim_contratoapr) = DATE '1900-01-01'
+                OR COALESCE(t.data_fim, t.data_fim_contratoapr) >= CURRENT_DATE
+            )
+        """)
+
+        kpis_where_sql = "WHERE " + " AND ".join(kpis_where)
+
+        kpis_sql = f"""
+            SELECT
+                COUNT(DISTINCT t.codigo) AS turmas_ativas,
+                COALESCE(SUM(tsr.matriculados), 0) AS alunos_periodo,
+                COALESCE(SUM(t.vagas_total), 0) AS vagas_periodo
+            FROM turmas t
+
+            LEFT JOIN turmas_status_resumo tsr
+                ON tsr.cod_turma = t.codigo
 
             LEFT JOIN uo u
-                ON u.codigo = o.cod_uo
+                ON u.codigo = t.cod_uo
 
             LEFT JOIN subregioes s
                 ON s.codigo = u.cod_subregiao
@@ -16746,58 +19725,8 @@ async def listar_turmas_executivo(
             LEFT JOIN regioes r
                 ON r.codigo = s.codigo_regiao
 
-            LEFT JOIN (
-                SELECT
-                    t.ano_referencia AS ano,
-                    t.cod_uo,
-                    t.cod_modalidade,
-                    t.cod_programa,
-                    EXTRACT(MONTH FROM t.data_inicio)::int AS mes,
-                    SUM(COALESCE(t.vagas_total, 0)) AS vagas_periodo
-                FROM turmas t
-                GROUP BY
-                    t.ano_referencia,
-                    t.cod_uo,
-                    t.cod_modalidade,
-                    t.cod_programa,
-                    EXTRACT(MONTH FROM t.data_inicio)::int
-            ) tur
-                ON tur.ano = rp.ano
-            AND tur.cod_uo = o.cod_uo
-            AND tur.cod_modalidade = o.cod_modalidade
-            AND tur.cod_programa = o.cod_programa
-            AND tur.mes = rp.mes
-
-            WHERE 1=1
+            {kpis_where_sql}
         """
-
-        kpis_params = []
-        kidx = 1
-
-        if ano:
-            kpis_sql += f" AND rp.ano = ${kidx}"
-            kpis_params.append(ano)
-            kidx += 1
-
-        if meses_lista:
-            kpis_sql += f" AND rp.mes = ANY(${kidx}::int[])"
-            kpis_params.append(meses_lista)
-            kidx += 1
-
-        if regiao:
-            kpis_sql += f" AND r.nome = ${kidx}"
-            kpis_params.append(regiao)
-            kidx += 1
-
-        if subregiao:
-            kpis_sql += f" AND s.nome = ${kidx}"
-            kpis_params.append(subregiao)
-            kidx += 1
-
-        if uo:
-            kpis_sql += f" AND u.nome = ${kidx}"
-            kpis_params.append(uo)
-            kidx += 1
 
         kpis = await conn.fetchrow(kpis_sql, *kpis_params)      
 
@@ -16914,3 +19843,3210 @@ async def gerar_relatorio_carteira_programas(
         filename="carteira_de_programas.pptx",
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation"
     )
+
+def _formatar_numero_pptx(valor) -> str:
+    numero = float(valor or 0)
+
+    if numero.is_integer():
+        return f"{int(numero):,}".replace(",", ".")
+
+    return (
+        f"{numero:,.2f}"
+        .replace(",", "X")
+        .replace(".", ",")
+        .replace("X", ".")
+    )
+
+
+def _formatar_moeda_pptx(valor) -> str:
+    numero = float(valor or 0)
+
+    texto = (
+        f"{numero:,.2f}"
+        .replace(",", "X")
+        .replace(".", ",")
+        .replace("X", ".")
+    )
+
+    return f"R$ {texto}"
+
+
+def _formatar_percentual_pptx(parte, total) -> str:
+    parte = float(parte or 0)
+    total = float(total or 0)
+
+    if total <= 0:
+        return "0,00%"
+
+    percentual = (parte / total) * 100
+
+    return f"{percentual:.2f}%".replace(".", ",")
+
+async def _listar_subregioes_caravana(
+    conn,
+    *,
+    regioes: list[str],
+    subregioes: list[str],
+) -> list[str]:
+    """
+    Retorna os nomes das sub-regiões que terão slides na apresentação.
+
+    O filtro de sub-região pode chegar:
+    - como código numérico, vindo do modal;
+    - como nome, em chamadas internas.
+    """
+
+    where = []
+    params = []
+    idx = 1
+
+    # ======================================================
+    # FILTRO DE REGIÃO
+    # ======================================================
+
+    regioes_normalizadas = [
+        str(regiao).strip().upper()
+        for regiao in (regioes or [])
+        if str(regiao).strip()
+    ]
+
+    if regioes_normalizadas:
+        where.append(
+            f"UPPER(TRIM(r.nome)) = ANY(${idx}::text[])"
+        )
+
+        params.append(
+            regioes_normalizadas
+        )
+
+        idx += 1
+
+    # ======================================================
+    # FILTRO DE SUB-REGIÃO
+    # ======================================================
+
+    ids_subregioes = [
+        int(valor)
+        for valor in (subregioes or [])
+        if str(valor or "").strip().isdigit()
+    ]
+
+    nomes_subregioes = [
+        str(valor).strip().upper()
+        for valor in (subregioes or [])
+        if (
+            str(valor or "").strip()
+            and not str(valor or "").strip().isdigit()
+        )
+    ]
+
+    # Caso o frontend tenha enviado códigos.
+    if ids_subregioes:
+        where.append(
+            f"s.codigo = ANY(${idx}::int[])"
+        )
+
+        params.append(
+            ids_subregioes
+        )
+
+        idx += 1
+
+    # Caso alguma chamada interna envie nomes.
+    elif nomes_subregioes:
+        where.append(
+            f"UPPER(TRIM(s.nome)) = ANY(${idx}::text[])"
+        )
+
+        params.append(
+            nomes_subregioes
+        )
+
+        idx += 1
+
+    # ======================================================
+    # WHERE
+    # ======================================================
+
+    where_sql = ""
+
+    if where:
+        where_sql = (
+            "WHERE "
+            + " AND ".join(where)
+        )
+
+    # ======================================================
+    # CONSULTA
+    # ======================================================
+
+    sql = f"""
+        SELECT DISTINCT
+            s.nome
+
+        FROM subregioes s
+
+        INNER JOIN regioes r
+            ON r.codigo = s.codigo_regiao
+
+        {where_sql}
+
+        ORDER BY s.nome
+    """
+
+    rows = await conn.fetch(
+        sql,
+        *params,
+    )
+
+    # ======================================================
+    # RETORNO
+    # ======================================================
+
+    return [
+        str(row["nome"]).strip()
+        for row in rows
+        if row["nome"]
+    ]
+
+async def _buscar_dados_panorama_caravana(
+    conn,
+    *,
+    ano: int,
+    meses: list[int],
+    regioes: list[str],
+    subregioes: list[str],
+) -> dict:
+    """
+    Busca as metas do SENAI-RS e as metas do recorte selecionado.
+
+    Os percentuais representam a participação do recorte regional
+    sobre o total do SENAI-RS.
+    """
+
+    meses_validos = sorted({
+        int(mes)
+        for mes in meses
+        if str(mes).isdigit() and 1 <= int(mes) <= 12
+    })
+
+    if not meses_validos:
+        meses_validos = list(range(1, 13))
+
+    regioes_normalizadas = [
+        str(regiao).strip().upper()
+        for regiao in regioes
+        if str(regiao).strip()
+    ]
+
+    # ==========================================================
+    # NORMALIZAÇÃO DAS SUB-REGIÕES
+    #
+    # O filtro pode chegar de duas formas:
+    # - código numérico, vindo da tela;
+    # - nome da sub-região, usado na geração dos slides.
+    # ==========================================================
+
+    ids_subregioes = [
+        int(valor)
+        for valor in subregioes
+        if str(valor or "").strip().isdigit()
+    ]
+
+    nomes_subregioes_diretos = [
+        str(valor).strip().upper()
+        for valor in subregioes
+        if (
+            str(valor or "").strip()
+            and not str(valor or "").strip().isdigit()
+        )
+    ]
+
+    nomes_subregioes: list[str] = []
+
+    # Quando o filtro chegou por código, busca os nomes no banco.
+    if ids_subregioes:
+        rows_subregioes = await conn.fetch(
+            """
+            SELECT
+                UPPER(TRIM(nome)) AS nome
+            FROM subregioes
+            WHERE codigo = ANY($1::int[])
+            """,
+            ids_subregioes,
+        )
+
+        nomes_subregioes.extend(
+            row["nome"]
+            for row in rows_subregioes
+            if row["nome"]
+        )
+
+    # Quando o filtro já chegou pelo nome, utiliza-o diretamente.
+    nomes_subregioes.extend(
+        nomes_subregioes_diretos
+    )
+
+    # Remove duplicidades e valores vazios.
+    nomes_subregioes = sorted({
+        str(nome).strip().upper()
+        for nome in nomes_subregioes
+        if str(nome or "").strip()
+    })
+
+    sql = """
+        WITH ultimo_lote AS (
+            SELECT pil.id AS lote_id
+            FROM planejamento_import_lotes pil
+            WHERE pil.ano_referencia = $1
+              AND pil.status_processamento = 'processado'
+            ORDER BY pil.id DESC
+            LIMIT 1
+        ),
+
+        base AS (
+            SELECT
+                UPPER(TRIM(COALESCE(ps.regiao, ''))) AS regiao,
+                UPPER(TRIM(COALESCE(ps.subregiao, ''))) AS subregiao,
+                UPPER(TRIM(COALESCE(ps.conta, ''))) AS conta,
+                UPPER(TRIM(COALESCE(ps.financiamento_raw, '')))
+                    AS financiamento,
+
+                -- Valor somente dos meses selecionados
+                (
+                    CASE WHEN 1 = ANY($2::int[])
+                        THEN COALESCE(ps.jan, 0) ELSE 0 END
+                    + CASE WHEN 2 = ANY($2::int[])
+                        THEN COALESCE(ps.fev, 0) ELSE 0 END
+                    + CASE WHEN 3 = ANY($2::int[])
+                        THEN COALESCE(ps.mar, 0) ELSE 0 END
+                    + CASE WHEN 4 = ANY($2::int[])
+                        THEN COALESCE(ps.abr, 0) ELSE 0 END
+                    + CASE WHEN 5 = ANY($2::int[])
+                        THEN COALESCE(ps.mai, 0) ELSE 0 END
+                    + CASE WHEN 6 = ANY($2::int[])
+                        THEN COALESCE(ps.jun, 0) ELSE 0 END
+                    + CASE WHEN 7 = ANY($2::int[])
+                        THEN COALESCE(ps.jul, 0) ELSE 0 END
+                    + CASE WHEN 8 = ANY($2::int[])
+                        THEN COALESCE(ps.ago, 0) ELSE 0 END
+                    + CASE WHEN 9 = ANY($2::int[])
+                        THEN COALESCE(ps.set_, 0) ELSE 0 END
+                    + CASE WHEN 10 = ANY($2::int[])
+                        THEN COALESCE(ps.out_, 0) ELSE 0 END
+                    + CASE WHEN 11 = ANY($2::int[])
+                        THEN COALESCE(ps.nov, 0) ELSE 0 END
+                    + CASE WHEN 12 = ANY($2::int[])
+                        THEN COALESCE(ps.dez, 0) ELSE 0 END
+                )::numeric AS valor_periodo,
+
+                -- Valor anual, independentemente dos meses selecionados
+                (
+                    COALESCE(ps.jan, 0)
+                    + COALESCE(ps.fev, 0)
+                    + COALESCE(ps.mar, 0)
+                    + COALESCE(ps.abr, 0)
+                    + COALESCE(ps.mai, 0)
+                    + COALESCE(ps.jun, 0)
+                    + COALESCE(ps.jul, 0)
+                    + COALESCE(ps.ago, 0)
+                    + COALESCE(ps.set_, 0)
+                    + COALESCE(ps.out_, 0)
+                    + COALESCE(ps.nov, 0)
+                    + COALESCE(ps.dez, 0)
+                )::numeric AS valor_ano
+
+            FROM planejamento_staging ps
+
+            JOIN ultimo_lote ul
+              ON ul.lote_id = ps.lote_id
+
+            WHERE ps.flag_valida IS DISTINCT FROM FALSE
+              AND UPPER(TRIM(ps.tipo)) = 'META'
+        ),
+
+        total_senai AS (
+            SELECT
+                -- META ANUAL: será mostrada no primeiro retângulo
+                COALESCE(SUM(valor_ano) FILTER (
+                    WHERE conta IN ('MATRÍCULAS', 'MATRICULAS')
+                ), 0) AS matriculas_ano,
+
+                COALESCE(SUM(valor_ano) FILTER (
+                    WHERE conta IN (
+                        'RECEITAS CORRENTES',
+                        'RECEITA',
+                        'RECEITAS'
+                    )
+                ), 0) AS receita_ano,
+
+                COALESCE(SUM(valor_ano) FILTER (
+                    WHERE conta IN (
+                        'HORA ALUNO',
+                        'HORA-ALUNO',
+                        'HORA_ALUNO'
+                    )
+                ), 0) AS hora_aluno_ano,
+
+                COALESCE(SUM(valor_ano) FILTER (
+                    WHERE conta IN (
+                        'HORA ALUNO',
+                        'HORA-ALUNO',
+                        'HORA_ALUNO'
+                    )
+                    AND financiamento = 'GRATUIDADE REGIMENTAL'
+                ), 0) AS hora_aluno_gr_ano,
+
+                -- META DO PERÍODO: continuará sendo usada nos percentuais
+                COALESCE(SUM(valor_periodo) FILTER (
+                    WHERE conta IN ('MATRÍCULAS', 'MATRICULAS')
+                ), 0) AS matriculas_periodo,
+
+                COALESCE(SUM(valor_periodo) FILTER (
+                    WHERE conta IN (
+                        'RECEITAS CORRENTES',
+                        'RECEITA',
+                        'RECEITAS'
+                    )
+                ), 0) AS receita_periodo,
+
+                COALESCE(SUM(valor_periodo) FILTER (
+                    WHERE conta IN (
+                        'HORA ALUNO',
+                        'HORA-ALUNO',
+                        'HORA_ALUNO'
+                    )
+                ), 0) AS hora_aluno_periodo,
+
+                COALESCE(SUM(valor_periodo) FILTER (
+                    WHERE conta IN (
+                        'HORA ALUNO',
+                        'HORA-ALUNO',
+                        'HORA_ALUNO'
+                    )
+                    AND financiamento = 'GRATUIDADE REGIMENTAL'
+                ), 0) AS hora_aluno_gr_periodo
+
+            FROM base
+        ),
+
+        total_recorte AS (
+            SELECT
+                -- Metas anuais da região: segundo retângulo
+                COALESCE(SUM(valor_ano) FILTER (
+                    WHERE conta IN ('MATRÍCULAS', 'MATRICULAS')
+                ), 0) AS matriculas_ano,
+
+                COALESCE(SUM(valor_ano) FILTER (
+                    WHERE conta IN (
+                        'RECEITAS CORRENTES',
+                        'RECEITA',
+                        'RECEITAS'
+                    )
+                ), 0) AS receita_ano,
+
+                COALESCE(SUM(valor_ano) FILTER (
+                    WHERE conta IN (
+                        'HORA ALUNO',
+                        'HORA-ALUNO',
+                        'HORA_ALUNO'
+                    )
+                ), 0) AS hora_aluno_ano,
+
+                COALESCE(SUM(valor_ano) FILTER (
+                    WHERE conta IN (
+                        'HORA ALUNO',
+                        'HORA-ALUNO',
+                        'HORA_ALUNO'
+                    )
+                    AND financiamento = 'GRATUIDADE REGIMENTAL'
+                ), 0) AS hora_aluno_gr_ano,
+
+                -- Metas da região no período: cálculo dos percentuais
+                COALESCE(SUM(valor_periodo) FILTER (
+                    WHERE conta IN ('MATRÍCULAS', 'MATRICULAS')
+                ), 0) AS matriculas_periodo,
+
+                COALESCE(SUM(valor_periodo) FILTER (
+                    WHERE conta IN (
+                        'RECEITAS CORRENTES',
+                        'RECEITA',
+                        'RECEITAS'
+                    )
+                ), 0) AS receita_periodo,
+
+                COALESCE(SUM(valor_periodo) FILTER (
+                    WHERE conta IN (
+                        'HORA ALUNO',
+                        'HORA-ALUNO',
+                        'HORA_ALUNO'
+                    )
+                ), 0) AS hora_aluno_periodo,
+
+                COALESCE(SUM(valor_periodo) FILTER (
+                    WHERE conta IN (
+                        'HORA ALUNO',
+                        'HORA-ALUNO',
+                        'HORA_ALUNO'
+                    )
+                    AND financiamento = 'GRATUIDADE REGIMENTAL'
+                ), 0) AS hora_aluno_gr_periodo
+
+            FROM base
+
+            WHERE regiao = ANY($3::text[])
+            AND (
+                COALESCE(array_length($4::text[], 1), 0) = 0
+                OR subregiao = ANY($4::text[])
+            )
+        )
+
+        SELECT
+            -- Metas anuais para o primeiro retângulo
+            s.matriculas_ano AS senai_matriculas_ano,
+            s.receita_ano AS senai_receita_ano,
+            s.hora_aluno_ano AS senai_hora_aluno_ano,
+            s.hora_aluno_gr_ano AS senai_hora_aluno_gr_ano,
+
+            -- Metas do período para calcular participação
+            s.matriculas_periodo AS senai_matriculas_periodo,
+            s.receita_periodo AS senai_receita_periodo,
+            s.hora_aluno_periodo AS senai_hora_aluno_periodo,
+            s.hora_aluno_gr_periodo AS senai_hora_aluno_gr_periodo,
+
+            -- Valores anuais da região para o segundo retângulo
+            r.matriculas_ano AS recorte_matriculas_ano,
+            r.receita_ano AS recorte_receita_ano,
+            r.hora_aluno_ano AS recorte_hora_aluno_ano,
+            r.hora_aluno_gr_ano AS recorte_hora_aluno_gr_ano,
+
+            -- Valores do período para calcular participação
+            r.matriculas_periodo AS recorte_matriculas_periodo,
+            r.receita_periodo AS recorte_receita_periodo,
+            r.hora_aluno_periodo AS recorte_hora_aluno_periodo,
+            r.hora_aluno_gr_periodo AS recorte_hora_aluno_gr_periodo
+
+        FROM total_senai s
+        CROSS JOIN total_recorte r
+    """
+
+    row = await conn.fetchrow(
+        sql,
+        ano,
+        meses_validos,
+        regioes_normalizadas,
+        nomes_subregioes,
+    )
+
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail="Não foram encontrados dados para o recorte selecionado.",
+        )
+    
+    rows_top_programas = await conn.fetch(
+        """
+        SELECT
+            TRIM(COALESCE(ps.programa_raw, '')) AS programa,
+            SUM(
+                COALESCE(ps.jan, 0)
+                + COALESCE(ps.fev, 0)
+                + COALESCE(ps.mar, 0)
+                + COALESCE(ps.abr, 0)
+                + COALESCE(ps.mai, 0)
+                + COALESCE(ps.jun, 0)
+                + COALESCE(ps.jul, 0)
+                + COALESCE(ps.ago, 0)
+                + COALESCE(ps.set_, 0)
+                + COALESCE(ps.out_, 0)
+                + COALESCE(ps.nov, 0)
+                + COALESCE(ps.dez, 0)
+            ) AS matriculas
+        FROM planejamento_staging ps
+
+        WHERE ps.lote_id = (
+            SELECT pil.id
+            FROM planejamento_import_lotes pil
+            WHERE pil.ano_referencia = $1
+            AND pil.status_processamento = 'processado'
+            ORDER BY pil.id DESC
+            LIMIT 1
+        )
+
+        AND ps.flag_valida IS DISTINCT FROM FALSE
+        AND UPPER(TRIM(COALESCE(ps.tipo, ''))) = 'META'
+
+        AND UPPER(TRIM(COALESCE(ps.conta, ''))) IN (
+            'MATRÍCULAS',
+            'MATRICULAS'
+        )
+
+        AND (
+            COALESCE(array_length($2::text[], 1), 0) = 0
+            OR UPPER(TRIM(COALESCE(ps.regiao, '')))
+                = ANY($2::text[])
+        )
+
+        AND (
+            COALESCE(array_length($3::text[], 1), 0) = 0
+            OR UPPER(TRIM(COALESCE(ps.subregiao, '')))
+                = ANY($3::text[])
+        )
+
+        AND TRIM(COALESCE(ps.programa_raw, '')) <> ''
+
+        GROUP BY
+            TRIM(COALESCE(ps.programa_raw, ''))
+
+        HAVING SUM(
+            COALESCE(ps.jan, 0)
+            + COALESCE(ps.fev, 0)
+            + COALESCE(ps.mar, 0)
+            + COALESCE(ps.abr, 0)
+            + COALESCE(ps.mai, 0)
+            + COALESCE(ps.jun, 0)
+            + COALESCE(ps.jul, 0)
+            + COALESCE(ps.ago, 0)
+            + COALESCE(ps.set_, 0)
+            + COALESCE(ps.out_, 0)
+            + COALESCE(ps.nov, 0)
+            + COALESCE(ps.dez, 0)
+        ) > 0
+
+        ORDER BY matriculas DESC
+        LIMIT 3
+        """,
+        ano,
+        regioes_normalizadas,
+        nomes_subregioes,
+    )
+
+    total_programas = await conn.fetchval(
+        """
+        SELECT COUNT(
+            DISTINCT UPPER(
+                TRIM(
+                    COALESCE(
+                        ps.programa_raw,
+                        ''
+                    )
+                )
+            )
+        )
+        FROM planejamento_staging ps
+
+        WHERE ps.lote_id = (
+            SELECT pil.id
+            FROM planejamento_import_lotes pil
+            WHERE pil.ano_referencia = $1
+            AND pil.status_processamento = 'processado'
+            ORDER BY pil.id DESC
+            LIMIT 1
+        )
+
+        AND ps.flag_valida IS DISTINCT FROM FALSE
+
+        AND UPPER(
+            TRIM(
+                COALESCE(
+                    ps.tipo,
+                    ''
+                )
+            )
+        ) = 'META'
+
+        AND UPPER(
+            TRIM(
+                COALESCE(
+                    ps.conta,
+                    ''
+                )
+            )
+        ) IN (
+            'MATRÍCULAS',
+            'MATRICULAS'
+        )
+
+        AND (
+            COALESCE(
+                array_length(
+                    $2::text[],
+                    1
+                ),
+                0
+            ) = 0
+
+            OR UPPER(
+                TRIM(
+                    COALESCE(
+                        ps.regiao,
+                        ''
+                    )
+                )
+            ) = ANY($2::text[])
+        )
+
+        AND (
+            COALESCE(
+                array_length(
+                    $3::text[],
+                    1
+                ),
+                0
+            ) = 0
+
+            OR UPPER(
+                TRIM(
+                    COALESCE(
+                        ps.subregiao,
+                        ''
+                    )
+                )
+            ) = ANY($3::text[])
+        )
+
+        AND TRIM(
+            COALESCE(
+                ps.programa_raw,
+                ''
+            )
+        ) <> ''
+
+        AND (
+            COALESCE(ps.jan, 0)
+            + COALESCE(ps.fev, 0)
+            + COALESCE(ps.mar, 0)
+            + COALESCE(ps.abr, 0)
+            + COALESCE(ps.mai, 0)
+            + COALESCE(ps.jun, 0)
+            + COALESCE(ps.jul, 0)
+            + COALESCE(ps.ago, 0)
+            + COALESCE(ps.set_, 0)
+            + COALESCE(ps.out_, 0)
+            + COALESCE(ps.nov, 0)
+            + COALESCE(ps.dez, 0)
+        ) > 0
+        """,
+        ano,
+        regioes_normalizadas,
+        nomes_subregioes,
+    )
+
+    total_programas = int(total_programas or 0)
+
+    top_programas = [
+        row_programa["programa"]
+        for row_programa in rows_top_programas
+        if row_programa["programa"]
+    ]
+
+    row_distribuicao_matriculas = await conn.fetchrow(
+        """
+        SELECT
+            COALESCE(
+                SUM(COALESCE(ps.total, 0))
+                FILTER (
+                    WHERE UPPER(
+                        TRIM(
+                            COALESCE(
+                                ps.financiamento_raw,
+                                ''
+                            )
+                        )
+                    ) = 'GRATUIDADE REGIMENTAL'
+                ),
+                0
+            ) AS matriculas_gr,
+
+            COALESCE(
+                SUM(COALESCE(ps.total, 0))
+                FILTER (
+                    WHERE UPPER(
+                        TRIM(
+                            COALESCE(
+                                ps.financiamento_raw,
+                                ''
+                            )
+                        )
+                    ) = 'GRATUIDADE NÃO REGIMENTAL'
+                ),
+                0
+            ) AS matriculas_gnr,
+
+            COALESCE(
+                SUM(COALESCE(ps.total, 0))
+                FILTER (
+                    WHERE UPPER(
+                        TRIM(
+                            COALESCE(
+                                ps.financiamento_raw,
+                                ''
+                            )
+                        )
+                    ) IN (
+                        'PAGO POR PESSOA FÍSICA OU EMPRESA',
+                        'NOVO BRASIL + PRODUTIVO'
+                    )
+                ),
+                0
+            ) AS matriculas_pg
+
+        FROM planejamento_staging ps
+
+        WHERE ps.lote_id = (
+            SELECT pil.id
+            FROM planejamento_import_lotes pil
+            WHERE pil.ano_referencia = $1
+            AND pil.status_processamento = 'processado'
+            ORDER BY pil.id DESC
+            LIMIT 1
+        )
+
+        AND ps.flag_valida IS DISTINCT FROM FALSE
+
+        AND UPPER(
+            TRIM(
+                COALESCE(
+                    ps.tipo,
+                    ''
+                )
+            )
+        ) = 'META'
+
+        AND UPPER(
+            TRIM(
+                COALESCE(
+                    ps.conta,
+                    ''
+                )
+            )
+        ) IN (
+            'MATRÍCULAS',
+            'MATRICULAS'
+        )
+
+        AND (
+            COALESCE(
+                array_length(
+                    $2::text[],
+                    1
+                ),
+                0
+            ) = 0
+
+            OR UPPER(
+                TRIM(
+                    COALESCE(
+                        ps.regiao,
+                        ''
+                    )
+                )
+            ) = ANY($2::text[])
+        )
+
+        AND (
+            COALESCE(
+                array_length(
+                    $3::text[],
+                    1
+                ),
+                0
+            ) = 0
+
+            OR UPPER(
+                TRIM(
+                    COALESCE(
+                        ps.subregiao,
+                        ''
+                    )
+                )
+            ) = ANY($3::text[])
+        )
+        """,
+        ano,
+        regioes_normalizadas,
+        nomes_subregioes,
+    )
+
+    matriculas_gr = float(
+        row_distribuicao_matriculas["matriculas_gr"]
+        or 0
+    )
+
+    matriculas_gnr = float(
+        row_distribuicao_matriculas["matriculas_gnr"]
+        or 0
+    )
+
+    matriculas_pg = float(
+        row_distribuicao_matriculas["matriculas_pg"]
+        or 0
+    )
+
+    total_matriculas_financiamento = (
+        matriculas_gr
+        + matriculas_gnr
+        + matriculas_pg
+    )
+
+
+    def calcular_percentual(
+        valor: float,
+        total: float,
+    ) -> float:
+        if total <= 0:
+            return 0.0
+
+        return valor / total * 100
+
+
+    percentual_gr = calcular_percentual(
+        matriculas_gr,
+        total_matriculas_financiamento,
+    )
+
+    percentual_gnr = calcular_percentual(
+        matriculas_gnr,
+        total_matriculas_financiamento,
+    )
+
+    percentual_pg = calcular_percentual(
+        matriculas_pg,
+        total_matriculas_financiamento,
+    )
+
+    row_distribuicao_hora_aluno = await conn.fetchrow(
+        """
+        SELECT
+            COALESCE(
+                SUM(COALESCE(ps.total, 0))
+                FILTER (
+                    WHERE UPPER(
+                        TRIM(
+                            COALESCE(
+                                ps.financiamento_raw,
+                                ''
+                            )
+                        )
+                    ) = 'GRATUIDADE REGIMENTAL'
+                ),
+                0
+            ) AS hora_aluno_gr,
+
+            COALESCE(
+                SUM(COALESCE(ps.total, 0))
+                FILTER (
+                    WHERE UPPER(
+                        TRIM(
+                            COALESCE(
+                                ps.financiamento_raw,
+                                ''
+                            )
+                        )
+                    ) = 'GRATUIDADE NÃO REGIMENTAL'
+                ),
+                0
+            ) AS hora_aluno_gnr,
+
+            COALESCE(
+                SUM(COALESCE(ps.total, 0))
+                FILTER (
+                    WHERE UPPER(
+                        TRIM(
+                            COALESCE(
+                                ps.financiamento_raw,
+                                ''
+                            )
+                        )
+                    ) IN (
+                        'PAGO POR PESSOA FÍSICA OU EMPRESA',
+                        'NOVO BRASIL + PRODUTIVO'
+                    )
+                ),
+                0
+            ) AS hora_aluno_pg
+
+        FROM planejamento_staging ps
+
+        WHERE ps.lote_id = (
+            SELECT pil.id
+            FROM planejamento_import_lotes pil
+            WHERE pil.ano_referencia = $1
+            AND pil.status_processamento = 'processado'
+            ORDER BY pil.id DESC
+            LIMIT 1
+        )
+
+        AND ps.flag_valida IS DISTINCT FROM FALSE
+
+        AND UPPER(
+            TRIM(
+                COALESCE(
+                    ps.tipo,
+                    ''
+                )
+            )
+        ) = 'META'
+
+        AND UPPER(
+            TRIM(
+                COALESCE(
+                    ps.conta,
+                    ''
+                )
+            )
+        ) IN (
+            'HORA-ALUNO',
+            'HORA ALUNO'
+        )
+
+        AND (
+            COALESCE(
+                array_length(
+                    $2::text[],
+                    1
+                ),
+                0
+            ) = 0
+
+            OR UPPER(
+                TRIM(
+                    COALESCE(
+                        ps.regiao,
+                        ''
+                    )
+                )
+            ) = ANY($2::text[])
+        )
+
+        AND (
+            COALESCE(
+                array_length(
+                    $3::text[],
+                    1
+                ),
+                0
+            ) = 0
+
+            OR UPPER(
+                TRIM(
+                    COALESCE(
+                        ps.subregiao,
+                        ''
+                    )
+                )
+            ) = ANY($3::text[])
+        )
+        """,
+        ano,
+        regioes_normalizadas,
+        nomes_subregioes,
+    )
+
+    hora_aluno_gr = float(
+        row_distribuicao_hora_aluno["hora_aluno_gr"]
+        or 0
+    )
+
+    hora_aluno_gnr = float(
+        row_distribuicao_hora_aluno["hora_aluno_gnr"]
+        or 0
+    )
+
+    hora_aluno_pg = float(
+        row_distribuicao_hora_aluno["hora_aluno_pg"]
+        or 0
+    )
+
+    total_hora_aluno_financiamento = (
+        hora_aluno_gr
+        + hora_aluno_gnr
+        + hora_aluno_pg
+    )
+
+    percentual_hora_aluno_gr = calcular_percentual(
+        hora_aluno_gr,
+        total_hora_aluno_financiamento,
+    )
+
+    percentual_hora_aluno_gnr = calcular_percentual(
+        hora_aluno_gnr,
+        total_hora_aluno_financiamento,
+    )
+
+    percentual_hora_aluno_pg = calcular_percentual(
+        hora_aluno_pg,
+        total_hora_aluno_financiamento,
+    )
+
+    row_distribuicao_receita = await conn.fetchrow(
+        """
+        SELECT
+            COALESCE(
+                SUM(COALESCE(ps.total, 0))
+                FILTER (
+                    WHERE UPPER(
+                        TRIM(
+                            COALESCE(
+                                ps.financiamento_raw,
+                                ''
+                            )
+                        )
+                    ) = 'GRATUIDADE REGIMENTAL'
+                ),
+                0
+            ) AS receita_gr,
+
+            COALESCE(
+                SUM(COALESCE(ps.total, 0))
+                FILTER (
+                    WHERE UPPER(
+                        TRIM(
+                            COALESCE(
+                                ps.financiamento_raw,
+                                ''
+                            )
+                        )
+                    ) = 'GRATUIDADE NÃO REGIMENTAL'
+                ),
+                0
+            ) AS receita_gnr,
+
+            COALESCE(
+                SUM(COALESCE(ps.total, 0))
+                FILTER (
+                    WHERE UPPER(
+                        TRIM(
+                            COALESCE(
+                                ps.financiamento_raw,
+                                ''
+                            )
+                        )
+                    ) IN (
+                        'PAGO POR PESSOA FÍSICA OU EMPRESA',
+                        'NOVO BRASIL + PRODUTIVO'
+                    )
+                ),
+                0
+            ) AS receita_pg
+
+        FROM planejamento_staging ps
+
+        WHERE ps.lote_id = (
+            SELECT pil.id
+            FROM planejamento_import_lotes pil
+            WHERE pil.ano_referencia = $1
+            AND pil.status_processamento = 'processado'
+            ORDER BY pil.id DESC
+            LIMIT 1
+        )
+
+        AND ps.flag_valida IS DISTINCT FROM FALSE
+
+        AND UPPER(
+            TRIM(
+                COALESCE(
+                    ps.tipo,
+                    ''
+                )
+            )
+        ) = 'META'
+
+        AND UPPER(
+            TRIM(
+                COALESCE(
+                    ps.conta,
+                    ''
+                )
+            )
+        ) = 'RECEITA'
+
+        AND (
+            COALESCE(
+                array_length(
+                    $2::text[],
+                    1
+                ),
+                0
+            ) = 0
+
+            OR UPPER(
+                TRIM(
+                    COALESCE(
+                        ps.regiao,
+                        ''
+                    )
+                )
+            ) = ANY($2::text[])
+        )
+
+        AND (
+            COALESCE(
+                array_length(
+                    $3::text[],
+                    1
+                ),
+                0
+            ) = 0
+
+            OR UPPER(
+                TRIM(
+                    COALESCE(
+                        ps.subregiao,
+                        ''
+                    )
+                )
+            ) = ANY($3::text[])
+        )
+        """,
+        ano,
+        regioes_normalizadas,
+        nomes_subregioes,
+    )
+
+    receita_gr = float(
+        row_distribuicao_receita["receita_gr"]
+        or 0
+    )
+
+    receita_gnr = float(
+        row_distribuicao_receita["receita_gnr"]
+        or 0
+    )
+
+    receita_pg = float(
+        row_distribuicao_receita["receita_pg"]
+        or 0
+    )
+
+    total_receita_financiamento = (
+        receita_gr
+        + receita_gnr
+        + receita_pg
+    )
+
+    percentual_receita_gr = calcular_percentual(
+        receita_gr,
+        total_receita_financiamento,
+    )
+
+    percentual_receita_gnr = calcular_percentual(
+        receita_gnr,
+        total_receita_financiamento,
+    )
+
+    percentual_receita_pg = calcular_percentual(
+        receita_pg,
+        total_receita_financiamento,
+    )
+
+    rows_programas = await conn.fetch(
+        """
+        WITH base AS (
+            SELECT
+                TRIM(ps.programa_raw) AS programa,
+
+                UPPER(TRIM(COALESCE(ps.conta, ''))) AS conta,
+
+                UPPER(
+                    TRIM(
+                        COALESCE(
+                            ps.financiamento_raw,
+                            ''
+                        )
+                    )
+                ) AS financiamento,
+
+                SUM(COALESCE(ps.total, 0)) AS valor
+
+            FROM planejamento_staging ps
+
+            WHERE ps.lote_id = (
+                SELECT pil.id
+                FROM planejamento_import_lotes pil
+                WHERE pil.ano_referencia = $1
+                AND pil.status_processamento = 'processado'
+                ORDER BY pil.id DESC
+                LIMIT 1
+            )
+
+            AND ps.flag_valida IS DISTINCT FROM FALSE
+
+            AND UPPER(TRIM(COALESCE(ps.tipo, ''))) = 'META'
+
+            AND TRIM(COALESCE(ps.programa_raw, '')) <> ''
+
+            AND (
+                COALESCE(array_length($2::text[], 1), 0) = 0
+                OR UPPER(TRIM(COALESCE(ps.regiao, '')))
+                        = ANY($2::text[])
+            )
+
+            AND (
+                COALESCE(array_length($3::text[], 1), 0) = 0
+                OR UPPER(TRIM(COALESCE(ps.subregiao, '')))
+                        = ANY($3::text[])
+            )
+
+            GROUP BY
+                TRIM(ps.programa_raw),
+                UPPER(TRIM(COALESCE(ps.conta, ''))),
+                UPPER(
+                    TRIM(
+                        COALESCE(
+                            ps.financiamento_raw,
+                            ''
+                        )
+                    )
+                )
+        )
+
+        SELECT
+            programa,
+
+            COALESCE(
+                SUM(valor) FILTER (
+                    WHERE conta IN (
+                        'MATRÍCULAS',
+                        'MATRICULAS'
+                    )
+                ),
+                0
+            ) AS matriculas,
+
+            COALESCE(
+                SUM(valor) FILTER (
+                    WHERE conta IN (
+                        'HORA-ALUNO',
+                        'HORA ALUNO'
+                    )
+                ),
+                0
+            ) AS hora_aluno,
+
+            COALESCE(
+                SUM(valor) FILTER (
+                    WHERE conta IN (
+                        'RECEITA',
+                        'RECEITAS CORRENTES'
+                    )
+                ),
+                0
+            ) AS receita,
+
+            COALESCE(
+                SUM(valor) FILTER (
+                    WHERE conta IN (
+                        'MATRÍCULAS',
+                        'MATRICULAS'
+                    )
+                    AND financiamento = 'GRATUIDADE REGIMENTAL'
+                ),
+                0
+            ) AS gr_matriculas,
+
+            COALESCE(
+                SUM(valor) FILTER (
+                    WHERE conta IN (
+                        'HORA-ALUNO',
+                        'HORA ALUNO'
+                    )
+                    AND financiamento = 'GRATUIDADE REGIMENTAL'
+                ),
+                0
+            ) AS gr_hora_aluno,
+
+            COALESCE(
+                SUM(valor) FILTER (
+                    WHERE conta IN (
+                        'MATRÍCULAS',
+                        'MATRICULAS'
+                    )
+                    AND financiamento = 'GRATUIDADE NÃO REGIMENTAL'
+                ),
+                0
+            ) AS gnr_matriculas,
+
+            COALESCE(
+                SUM(valor) FILTER (
+                    WHERE conta IN (
+                        'HORA-ALUNO',
+                        'HORA ALUNO'
+                    )
+                    AND financiamento = 'GRATUIDADE NÃO REGIMENTAL'
+                ),
+                0
+            ) AS gnr_hora_aluno,
+
+            COALESCE(
+                SUM(valor) FILTER (
+                    WHERE conta IN (
+                        'MATRÍCULAS',
+                        'MATRICULAS'
+                    )
+                    AND financiamento IN (
+                        'PAGO POR PESSOA FÍSICA OU EMPRESA',
+                        'NOVO BRASIL + PRODUTIVO'
+                    )
+                ),
+                0
+            ) AS pg_matriculas,
+
+            COALESCE(
+                SUM(valor) FILTER (
+                    WHERE conta IN (
+                        'HORA-ALUNO',
+                        'HORA ALUNO'
+                    )
+                    AND financiamento IN (
+                        'PAGO POR PESSOA FÍSICA OU EMPRESA',
+                        'NOVO BRASIL + PRODUTIVO'
+                    )
+                ),
+                0
+            ) AS pg_hora_aluno
+
+        FROM base
+
+        GROUP BY programa
+
+        ORDER BY
+            matriculas DESC,
+            programa
+        """,
+        ano,
+        regioes_normalizadas,
+        nomes_subregioes,
+    )
+
+    programas_subregiao = []
+
+    for row_programa in rows_programas:
+        matriculas = float(
+            row_programa["matriculas"]
+            or 0
+        )
+
+        gr_matriculas = float(
+            row_programa["gr_matriculas"]
+            or 0
+        )
+
+        gnr_matriculas = float(
+            row_programa["gnr_matriculas"]
+            or 0
+        )
+
+        pg_matriculas = float(
+            row_programa["pg_matriculas"]
+            or 0
+        )
+
+        programas_subregiao.append(
+            {
+                "programa": str(
+                    row_programa["programa"]
+                    or ""
+                ).strip(),
+
+                "matriculas": matriculas,
+
+                "hora_aluno": float(
+                    row_programa["hora_aluno"]
+                    or 0
+                ),
+
+                "receita": float(
+                    row_programa["receita"]
+                    or 0
+                ),
+
+                "gr": {
+                    "matriculas": gr_matriculas,
+                    "hora_aluno": float(
+                        row_programa["gr_hora_aluno"]
+                        or 0
+                    ),
+                    "percentual": (
+                        gr_matriculas
+                        / matriculas
+                        * 100
+                        if matriculas > 0
+                        else 0
+                    ),
+                },
+
+                "gnr": {
+                    "matriculas": gnr_matriculas,
+                    "hora_aluno": float(
+                        row_programa["gnr_hora_aluno"]
+                        or 0
+                    ),
+                    "percentual": (
+                        gnr_matriculas
+                        / matriculas
+                        * 100
+                        if matriculas > 0
+                        else 0
+                    ),
+                },
+
+                "pg": {
+                    "matriculas": pg_matriculas,
+                    "hora_aluno": float(
+                        row_programa["pg_hora_aluno"]
+                        or 0
+                    ),
+                    "percentual": (
+                        pg_matriculas
+                        / matriculas
+                        * 100
+                        if matriculas > 0
+                        else 0
+                    ),
+                },
+            }
+        )
+
+    return {
+        "top_programas": top_programas,
+        "total_programas": total_programas,
+
+        "distribuicao_matriculas": {
+            "gr": {
+                "valor": matriculas_gr,
+                "valor_formatado": (
+                    _formatar_numero_pptx(
+                        matriculas_gr
+                    )
+                ),
+                "percentual": percentual_gr,
+                "percentual_formatado": (
+                    _formatar_percentual_pptx(
+                        matriculas_gr,
+                        total_matriculas_financiamento,
+                    )
+                ),
+            },
+            "gnr": {
+                "valor": matriculas_gnr,
+                "valor_formatado": (
+                    _formatar_numero_pptx(
+                        matriculas_gnr
+                    )
+                ),
+                "percentual": percentual_gnr,
+                "percentual_formatado": (
+                    _formatar_percentual_pptx(
+                        matriculas_gnr,
+                        total_matriculas_financiamento,
+                    )
+                ),
+            },
+            "pg": {
+                "valor": matriculas_pg,
+                "valor_formatado": (
+                    _formatar_numero_pptx(
+                        matriculas_pg
+                    )
+                ),
+                "percentual": percentual_pg,
+                "percentual_formatado": (
+                    _formatar_percentual_pptx(
+                        matriculas_pg,
+                        total_matriculas_financiamento,
+                    )
+                ),
+            },
+        },
+
+        "distribuicao_hora_aluno": {
+            "gr": {
+                "valor": hora_aluno_gr,
+                "valor_formatado": _formatar_numero_pptx(
+                    hora_aluno_gr
+                ),
+                "percentual": percentual_hora_aluno_gr,
+                "percentual_formatado": (
+                    f"{percentual_hora_aluno_gr:,.2f}%"
+                    .replace(",", "X")
+                    .replace(".", ",")
+                    .replace("X", ".")
+                ),
+            },
+
+            "gnr": {
+                "valor": hora_aluno_gnr,
+                "valor_formatado": _formatar_numero_pptx(
+                    hora_aluno_gnr
+                ),
+                "percentual": percentual_hora_aluno_gnr,
+                "percentual_formatado": (
+                    f"{percentual_hora_aluno_gnr:,.2f}%"
+                    .replace(",", "X")
+                    .replace(".", ",")
+                    .replace("X", ".")
+                ),
+            },
+
+            "pg": {
+                "valor": hora_aluno_pg,
+                "valor_formatado": _formatar_numero_pptx(
+                    hora_aluno_pg
+                ),
+                "percentual": percentual_hora_aluno_pg,
+                "percentual_formatado": (
+                    f"{percentual_hora_aluno_pg:,.2f}%"
+                    .replace(",", "X")
+                    .replace(".", ",")
+                    .replace("X", ".")
+                ),
+            },
+
+            "total": total_hora_aluno_financiamento,
+
+            "total_formatado": _formatar_numero_pptx(
+                total_hora_aluno_financiamento
+            ),
+        },
+
+        "distribuicao_receita": {
+            "gr": {
+                "valor": receita_gr,
+                "valor_formatado": (
+                    f"R$ {receita_gr:,.2f}"
+                    .replace(",", "X")
+                    .replace(".", ",")
+                    .replace("X", ".")
+                ),
+                "percentual": percentual_receita_gr,
+                "percentual_formatado": (
+                    f"{percentual_receita_gr:,.2f}%"
+                    .replace(",", "X")
+                    .replace(".", ",")
+                    .replace("X", ".")
+                ),
+            },
+
+            "gnr": {
+                "valor": receita_gnr,
+                "valor_formatado": (
+                    f"R$ {receita_gnr:,.2f}"
+                    .replace(",", "X")
+                    .replace(".", ",")
+                    .replace("X", ".")
+                ),
+                "percentual": percentual_receita_gnr,
+                "percentual_formatado": (
+                    f"{percentual_receita_gnr:,.2f}%"
+                    .replace(",", "X")
+                    .replace(".", ",")
+                    .replace("X", ".")
+                ),
+            },
+
+            "pg": {
+                "valor": receita_pg,
+                "valor_formatado": (
+                    f"R$ {receita_pg:,.2f}"
+                    .replace(",", "X")
+                    .replace(".", ",")
+                    .replace("X", ".")
+                ),
+                "percentual": percentual_receita_pg,
+                "percentual_formatado": (
+                    f"{percentual_receita_pg:,.2f}%"
+                    .replace(",", "X")
+                    .replace(".", ",")
+                    .replace("X", ".")
+                ),
+            },
+
+            "total": total_receita_financiamento,
+
+            "total_formatado": (
+                f"R$ {total_receita_financiamento:,.2f}"
+                .replace(",", "X")
+                .replace(".", ",")
+                .replace("X", ".")
+            ),
+        },
+
+        "programas_detalhados": programas_subregiao,
+
+        "matriculas": {
+            # Primeiro retângulo: meta anual SENAI-RS
+            "meta": _formatar_numero_pptx(
+                row["senai_matriculas_ano"]
+            ),
+
+            # Segundo retângulo: meta anual da região
+            "regiao": _formatar_numero_pptx(
+                row["recorte_matriculas_ano"]
+            ),
+
+            # Terceiro retângulo: participação no período selecionado
+            "percentual": _formatar_percentual_pptx(
+                row["recorte_matriculas_ano"],
+                row["senai_matriculas_ano"],
+            ),
+        },
+
+        "receita": {
+            "meta": _formatar_moeda_pptx(
+                row["senai_receita_ano"]
+            ),
+            "regiao": _formatar_moeda_pptx(
+                row["recorte_receita_ano"]
+            ),
+            "percentual": _formatar_percentual_pptx(
+                row["recorte_receita_ano"],
+                row["senai_receita_ano"],
+            ),
+        },
+
+        "hora_aluno": {
+            "meta": _formatar_numero_pptx(
+                row["senai_hora_aluno_ano"]
+            ),
+            "regiao": _formatar_numero_pptx(
+                row["recorte_hora_aluno_ano"]
+            ),
+            "percentual": _formatar_percentual_pptx(
+                row["recorte_hora_aluno_ano"],
+                row["senai_hora_aluno_ano"],
+            ),
+        },
+
+        "rodape": {
+            "matriculas": round(
+                float(row["senai_matriculas_ano"])
+                / max(float(row["recorte_matriculas_ano"]), 1)
+            ),
+            "hora_aluno": round(
+                float(row["senai_hora_aluno_ano"])
+                / max(float(row["recorte_hora_aluno_ano"]), 1)
+            ),
+            "hora_aluno_gr": round(
+                float(row["senai_hora_aluno_gr_ano"])
+                / max(float(row["recorte_hora_aluno_gr_ano"]), 1)
+            ),
+        },
+
+        "hora_aluno_gr": {
+            "meta": _formatar_numero_pptx(
+                row["senai_hora_aluno_gr_ano"]
+            ),
+            "regiao": _formatar_numero_pptx(
+                row["recorte_hora_aluno_gr_ano"]
+            ),
+            "percentual": _formatar_percentual_pptx(
+                row["recorte_hora_aluno_gr_ano"],
+                row["senai_hora_aluno_gr_ano"],
+            ),
+        },
+    }
+
+async def _buscar_status_metas_subregiao_caravana(
+    conn,
+    *,
+    ano: int,
+    meses: list[int],
+    regioes: list[str],
+    subregiao: str,
+) -> dict:
+    """
+    Busca Meta x Realizado para o slide
+    Status das Metas de uma sub-região.
+
+    Nesta primeira etapa, alimenta:
+    - Matrículas;
+    - Hora-Aluno;
+    - Receita.
+
+    Os blocos de financiamento e programas serão
+    preenchidos nas próximas etapas.
+    """
+
+    # ======================================================
+    # NORMALIZAÇÃO DOS FILTROS
+    # ======================================================
+
+    meses_validos = sorted({
+        int(mes)
+        for mes in (meses or [])
+        if str(mes).isdigit()
+        and 1 <= int(mes) <= 12
+    })
+
+    if not meses_validos:
+        meses_validos = list(range(1, 13))
+
+    regioes_normalizadas = [
+        str(regiao).strip().upper()
+        for regiao in (regioes or [])
+        if str(regiao).strip()
+    ]
+
+    nome_subregiao = str(
+        subregiao or ""
+    ).strip().upper()
+
+    if not nome_subregiao:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Sub-região não informada para o "
+                "slide Status das Metas."
+            ),
+        )
+
+    # ======================================================
+    # META X REALIZADO
+    # ======================================================
+
+    row = await conn.fetchrow(
+        """
+        WITH ofertas_filtradas AS (
+            SELECT DISTINCT
+                o.codigo AS cod_oferta
+            FROM ofertas_programas o
+
+            JOIN uo u
+              ON u.codigo = o.cod_uo
+
+            JOIN subregioes s
+              ON s.codigo = CAST(
+                    u.cod_subregiao AS integer
+                 )
+
+            JOIN regioes r
+              ON r.codigo = s.codigo_regiao
+
+            WHERE o.ano = $1
+
+              AND UPPER(
+                    TRIM(
+                        COALESCE(
+                            s.nome,
+                            ''
+                        )
+                    )
+                  ) = $2
+
+              AND (
+                    COALESCE(
+                        array_length(
+                            $3::text[],
+                            1
+                        ),
+                        0
+                    ) = 0
+
+                    OR UPPER(
+                        TRIM(
+                            COALESCE(
+                                r.nome,
+                                ''
+                            )
+                        )
+                    ) = ANY($3::text[])
+              )
+        ),
+
+        metas AS (
+            SELECT
+                COALESCE(
+                    SUM(mp.matriculas_meta),
+                    0
+                ) AS matriculas,
+
+                COALESCE(
+                    SUM(mp.ha_meta),
+                    0
+                ) AS hora_aluno,
+
+                COALESCE(
+                    SUM(mp.receita_meta),
+                    0
+                ) AS receita
+
+            FROM meta_programas mp
+
+            JOIN ofertas_filtradas oferta
+              ON oferta.cod_oferta = mp.cod_oferta
+
+            WHERE mp.ano = $1
+              AND mp.mes = ANY($4::int[])
+        ),
+
+        realizados AS (
+            SELECT
+                COALESCE(
+                    SUM(rp.matriculas_real),
+                    0
+                ) AS matriculas,
+
+                COALESCE(
+                    SUM(rp.ha_real),
+                    0
+                ) AS hora_aluno,
+
+                COALESCE(
+                    SUM(rp.receita_real),
+                    0
+                ) AS receita
+
+            FROM realizado_programas rp
+
+            JOIN ofertas_filtradas oferta
+              ON oferta.cod_oferta = rp.cod_oferta
+
+            WHERE rp.ano = $1
+              AND rp.mes = ANY($4::int[])
+        )
+
+        SELECT
+            metas.matriculas
+                AS matriculas_meta,
+
+            realizados.matriculas
+                AS matriculas_real,
+
+            metas.hora_aluno
+                AS hora_aluno_meta,
+
+            realizados.hora_aluno
+                AS hora_aluno_real,
+
+            metas.receita
+                AS receita_meta,
+
+            realizados.receita
+                AS receita_real
+
+        FROM metas
+        CROSS JOIN realizados
+        """,
+        ano,
+        nome_subregiao,
+        regioes_normalizadas,
+        meses_validos,
+    )
+
+    # ======================================================
+    # META X REALIZADO POR FINANCIAMENTO
+    # ======================================================
+
+    rows_financiamentos = await conn.fetch(
+        """
+        WITH ofertas_filtradas AS (
+            SELECT DISTINCT
+                o.codigo AS cod_oferta,
+
+                CASE
+                    WHEN UPPER(
+                        TRIM(
+                            COALESCE(
+                                f.nome_financiamento,
+                                ''
+                            )
+                        )
+                    ) = 'GRATUIDADE REGIMENTAL'
+                    THEN 'GR'
+
+                    WHEN UPPER(
+                        TRIM(
+                            COALESCE(
+                                f.nome_financiamento,
+                                ''
+                            )
+                        )
+                    ) IN (
+                        'GRATUIDADE NÃO REGIMENTAL',
+                        'GRATUIDADE NAO REGIMENTAL',
+                        'GRATUITO'
+                    )
+                    THEN 'GNR'
+
+                    ELSE 'PG'
+                END AS grupo_financiamento
+
+            FROM ofertas_programas o
+
+            JOIN uo u
+            ON u.codigo = o.cod_uo
+
+            JOIN subregioes s
+            ON s.codigo = CAST(
+                    u.cod_subregiao AS integer
+                )
+
+            JOIN regioes r
+            ON r.codigo = s.codigo_regiao
+
+            LEFT JOIN financiamento f
+            ON f.codigo = o.cod_financiamento
+
+            WHERE o.ano = $1
+
+            AND UPPER(
+                    TRIM(
+                        COALESCE(
+                            s.nome,
+                            ''
+                        )
+                    )
+                ) = $2
+
+            AND (
+                    COALESCE(
+                        array_length(
+                            $3::text[],
+                            1
+                        ),
+                        0
+                    ) = 0
+
+                    OR UPPER(
+                        TRIM(
+                            COALESCE(
+                                r.nome,
+                                ''
+                            )
+                        )
+                    ) = ANY($3::text[])
+            )
+        ),
+
+        metas_financiamento AS (
+            SELECT
+                oferta.grupo_financiamento,
+
+                COALESCE(
+                    SUM(mp.matriculas_meta),
+                    0
+                ) AS matriculas_meta,
+
+                COALESCE(
+                    SUM(mp.ha_meta),
+                    0
+                ) AS hora_aluno_meta,
+
+                COALESCE(
+                    SUM(mp.receita_meta),
+                    0
+                ) AS receita_meta
+
+            FROM meta_programas mp
+
+            JOIN ofertas_filtradas oferta
+            ON oferta.cod_oferta = mp.cod_oferta
+
+            WHERE mp.ano = $1
+            AND mp.mes = ANY($4::int[])
+
+            GROUP BY
+                oferta.grupo_financiamento
+        ),
+
+        realizados_financiamento AS (
+            SELECT
+                oferta.grupo_financiamento,
+
+                COALESCE(
+                    SUM(rp.matriculas_real),
+                    0
+                ) AS matriculas_real,
+
+                COALESCE(
+                    SUM(rp.ha_real),
+                    0
+                ) AS hora_aluno_real,
+
+                COALESCE(
+                    SUM(rp.receita_real),
+                    0
+                ) AS receita_real
+
+            FROM realizado_programas rp
+
+            JOIN ofertas_filtradas oferta
+            ON oferta.cod_oferta = rp.cod_oferta
+
+            WHERE rp.ano = $1
+            AND rp.mes = ANY($4::int[])
+
+            GROUP BY
+                oferta.grupo_financiamento
+        ),
+
+        grupos AS (
+            SELECT 'GR'::text AS grupo_financiamento
+
+            UNION ALL
+
+            SELECT 'GNR'::text
+
+            UNION ALL
+
+            SELECT 'PG'::text
+        )
+
+        SELECT
+            grupos.grupo_financiamento,
+
+            COALESCE(
+                metas.matriculas_meta,
+                0
+            ) AS matriculas_meta,
+
+            COALESCE(
+                realizados.matriculas_real,
+                0
+            ) AS matriculas_real,
+
+            COALESCE(
+                metas.hora_aluno_meta,
+                0
+            ) AS hora_aluno_meta,
+
+            COALESCE(
+                realizados.hora_aluno_real,
+                0
+            ) AS hora_aluno_real,
+
+            COALESCE(
+                metas.receita_meta,
+                0
+            ) AS receita_meta,
+
+            COALESCE(
+                realizados.receita_real,
+                0
+            ) AS receita_real
+
+        FROM grupos
+
+        LEFT JOIN metas_financiamento metas
+        ON metas.grupo_financiamento =
+            grupos.grupo_financiamento
+
+        LEFT JOIN realizados_financiamento realizados
+        ON realizados.grupo_financiamento =
+            grupos.grupo_financiamento
+
+        ORDER BY
+            CASE grupos.grupo_financiamento
+                WHEN 'GR' THEN 1
+                WHEN 'GNR' THEN 2
+                ELSE 3
+            END
+        """,
+        ano,
+        nome_subregiao,
+        regioes_normalizadas,
+        meses_validos,
+    )
+
+    # ======================================================
+    # META X REALIZADO POR PROGRAMA
+    # ======================================================
+
+    rows_programas = await conn.fetch(
+        """
+        WITH ofertas_filtradas AS (
+            SELECT DISTINCT
+                o.codigo AS cod_oferta,
+                o.cod_programa,
+                COALESCE(
+                    NULLIF(
+                        TRIM(p.nome_programa),
+                        ''
+                    ),
+                    'PROGRAMA NÃO INFORMADO'
+                ) AS programa
+
+            FROM ofertas_programas o
+
+            JOIN programas p
+            ON p.codigo = o.cod_programa
+
+            JOIN uo u
+            ON u.codigo = o.cod_uo
+
+            JOIN subregioes s
+            ON s.codigo = CAST(
+                    u.cod_subregiao AS integer
+                )
+
+            JOIN regioes r
+            ON r.codigo = s.codigo_regiao
+
+            WHERE o.ano = $1
+
+            AND UPPER(
+                    TRIM(
+                        COALESCE(
+                            s.nome,
+                            ''
+                        )
+                    )
+                ) = $2
+
+            AND (
+                    COALESCE(
+                        array_length(
+                            $3::text[],
+                            1
+                        ),
+                        0
+                    ) = 0
+
+                    OR UPPER(
+                        TRIM(
+                            COALESCE(
+                                r.nome,
+                                ''
+                            )
+                        )
+                    ) = ANY($3::text[])
+            )
+        ),
+
+        metas_programa AS (
+            SELECT
+                oferta.cod_programa,
+                oferta.programa,
+
+                COALESCE(
+                    SUM(mp.matriculas_meta),
+                    0
+                ) AS matriculas_meta,
+
+                COALESCE(
+                    SUM(mp.ha_meta),
+                    0
+                ) AS hora_aluno_meta,
+
+                COALESCE(
+                    SUM(mp.receita_meta),
+                    0
+                ) AS receita_meta
+
+            FROM meta_programas mp
+
+            JOIN ofertas_filtradas oferta
+            ON oferta.cod_oferta = mp.cod_oferta
+
+            WHERE mp.ano = $1
+            AND mp.mes = ANY($4::int[])
+
+            GROUP BY
+                oferta.cod_programa,
+                oferta.programa
+        ),
+
+        realizados_programa AS (
+            SELECT
+                oferta.cod_programa,
+                oferta.programa,
+
+                COALESCE(
+                    SUM(rp.matriculas_real),
+                    0
+                ) AS matriculas_real,
+
+                COALESCE(
+                    SUM(rp.ha_real),
+                    0
+                ) AS hora_aluno_real,
+
+                COALESCE(
+                    SUM(rp.receita_real),
+                    0
+                ) AS receita_real
+
+            FROM realizado_programas rp
+
+            JOIN ofertas_filtradas oferta
+            ON oferta.cod_oferta = rp.cod_oferta
+
+            WHERE rp.ano = $1
+            AND rp.mes = ANY($4::int[])
+
+            GROUP BY
+                oferta.cod_programa,
+                oferta.programa
+        ),
+
+        programas_unificados AS (
+            SELECT
+                cod_programa,
+                programa
+            FROM metas_programa
+
+            UNION
+
+            SELECT
+                cod_programa,
+                programa
+            FROM realizados_programa
+        )
+
+        SELECT
+            programas_unificados.cod_programa,
+            programas_unificados.programa,
+
+            COALESCE(
+                metas.matriculas_meta,
+                0
+            ) AS matriculas_meta,
+
+            COALESCE(
+                realizados.matriculas_real,
+                0
+            ) AS matriculas_real,
+
+            COALESCE(
+                metas.hora_aluno_meta,
+                0
+            ) AS hora_aluno_meta,
+
+            COALESCE(
+                realizados.hora_aluno_real,
+                0
+            ) AS hora_aluno_real,
+
+            COALESCE(
+                metas.receita_meta,
+                0
+            ) AS receita_meta,
+
+            COALESCE(
+                realizados.receita_real,
+                0
+            ) AS receita_real
+
+        FROM programas_unificados
+
+        LEFT JOIN metas_programa metas
+        ON metas.cod_programa =
+            programas_unificados.cod_programa
+
+        LEFT JOIN realizados_programa realizados
+        ON realizados.cod_programa =
+            programas_unificados.cod_programa
+
+        ORDER BY
+            programas_unificados.programa
+        """,
+        ano,
+        nome_subregiao,
+        regioes_normalizadas,
+        meses_validos,
+    )
+
+    if not row:
+        row = {
+            "matriculas_meta": 0,
+            "matriculas_real": 0,
+            "hora_aluno_meta": 0,
+            "hora_aluno_real": 0,
+            "receita_meta": 0,
+            "receita_real": 0,
+        }
+
+    # ======================================================
+    # CONVERSÃO SEGURA
+    # ======================================================
+
+    def numero(valor) -> float:
+        try:
+            return float(valor or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    matriculas_meta = numero(
+        row["matriculas_meta"]
+    )
+
+    matriculas_real = numero(
+        row["matriculas_real"]
+    )
+
+    hora_aluno_meta = numero(
+        row["hora_aluno_meta"]
+    )
+
+    hora_aluno_real = numero(
+        row["hora_aluno_real"]
+    )
+
+    receita_meta = numero(
+        row["receita_meta"]
+    )
+
+    receita_real = numero(
+        row["receita_real"]
+    )
+
+    def calcular_percentual(
+        realizado: float,
+        meta: float,
+    ) -> float:
+        if meta <= 0:
+            return 0.0
+
+        return realizado / meta * 100
+    
+    # ======================================================
+    # ESTRUTURA POR FINANCIAMENTO
+    # ======================================================
+
+    financiamentos = {
+        "matriculas": {
+            "gr": {
+                "meta": 0.0,
+                "realizado": 0.0,
+                "percentual": 0.0,
+            },
+            "gnr": {
+                "meta": 0.0,
+                "realizado": 0.0,
+                "percentual": 0.0,
+            },
+            "pg": {
+                "meta": 0.0,
+                "realizado": 0.0,
+                "percentual": 0.0,
+            },
+        },
+
+        "hora_aluno": {
+            "gr": {
+                "meta": 0.0,
+                "realizado": 0.0,
+                "percentual": 0.0,
+            },
+            "gnr": {
+                "meta": 0.0,
+                "realizado": 0.0,
+                "percentual": 0.0,
+            },
+            "pg": {
+                "meta": 0.0,
+                "realizado": 0.0,
+                "percentual": 0.0,
+            },
+        },
+
+        "receita": {
+            "gr": {
+                "meta": 0.0,
+                "realizado": 0.0,
+                "percentual": 0.0,
+            },
+            "gnr": {
+                "meta": 0.0,
+                "realizado": 0.0,
+                "percentual": 0.0,
+            },
+            "pg": {
+                "meta": 0.0,
+                "realizado": 0.0,
+                "percentual": 0.0,
+            },
+        },
+    }
+
+    for linha_financiamento in rows_financiamentos:
+        grupo = str(
+            linha_financiamento[
+                "grupo_financiamento"
+            ]
+            or ""
+        ).strip().lower()
+
+        if grupo not in {
+            "gr",
+            "gnr",
+            "pg",
+        }:
+            continue
+
+        matriculas_meta_fin = numero(
+            linha_financiamento[
+                "matriculas_meta"
+            ]
+        )
+
+        matriculas_real_fin = numero(
+            linha_financiamento[
+                "matriculas_real"
+            ]
+        )
+
+        hora_aluno_meta_fin = numero(
+            linha_financiamento[
+                "hora_aluno_meta"
+            ]
+        )
+
+        hora_aluno_real_fin = numero(
+            linha_financiamento[
+                "hora_aluno_real"
+            ]
+        )
+
+        receita_meta_fin = numero(
+            linha_financiamento[
+                "receita_meta"
+            ]
+        )
+
+        receita_real_fin = numero(
+            linha_financiamento[
+                "receita_real"
+            ]
+        )
+
+        financiamentos["matriculas"][grupo] = {
+            "meta": matriculas_meta_fin,
+            "realizado": matriculas_real_fin,
+            "percentual": calcular_percentual(
+                matriculas_real_fin,
+                matriculas_meta_fin,
+            ),
+        }
+
+        financiamentos["hora_aluno"][grupo] = {
+            "meta": hora_aluno_meta_fin,
+            "realizado": hora_aluno_real_fin,
+            "percentual": calcular_percentual(
+                hora_aluno_real_fin,
+                hora_aluno_meta_fin,
+            ),
+        }
+
+        financiamentos["receita"][grupo] = {
+            "meta": receita_meta_fin,
+            "realizado": receita_real_fin,
+            "percentual": calcular_percentual(
+                receita_real_fin,
+                receita_meta_fin,
+            ),
+        }
+    
+    # ======================================================
+    # ESTRUTURA DOS PROGRAMAS
+    # ======================================================
+
+    programas_status = []
+
+    for linha_programa in rows_programas:
+        matriculas_meta_programa = numero(
+            linha_programa["matriculas_meta"]
+        )
+
+        matriculas_real_programa = numero(
+            linha_programa["matriculas_real"]
+        )
+
+        hora_aluno_meta_programa = numero(
+            linha_programa["hora_aluno_meta"]
+        )
+
+        hora_aluno_real_programa = numero(
+            linha_programa["hora_aluno_real"]
+        )
+
+        receita_meta_programa = numero(
+            linha_programa["receita_meta"]
+        )
+
+        receita_real_programa = numero(
+            linha_programa["receita_real"]
+        )
+
+        programas_status.append(
+            {
+                "cod_programa": linha_programa[
+                    "cod_programa"
+                ],
+
+                "programa": str(
+                    linha_programa["programa"]
+                    or "Programa não informado"
+                ).strip(),
+
+                "matriculas": {
+                    "meta": matriculas_meta_programa,
+                    "realizado": matriculas_real_programa,
+                    "percentual": calcular_percentual(
+                        matriculas_real_programa,
+                        matriculas_meta_programa,
+                    ),
+                },
+
+                "hora_aluno": {
+                    "meta": hora_aluno_meta_programa,
+                    "realizado": hora_aluno_real_programa,
+                    "percentual": calcular_percentual(
+                        hora_aluno_real_programa,
+                        hora_aluno_meta_programa,
+                    ),
+                },
+
+                "receita": {
+                    "meta": receita_meta_programa,
+                    "realizado": receita_real_programa,
+                    "percentual": calcular_percentual(
+                        receita_real_programa,
+                        receita_meta_programa,
+                    ),
+                },
+            }
+        )
+    
+    programas_status = sorted(
+        programas_status,
+        key=lambda item: (
+            float(
+                item["matriculas"].get(
+                    "meta",
+                    0,
+                )
+                or 0
+            ),
+            float(
+                item["matriculas"].get(
+                    "realizado",
+                    0,
+                )
+                or 0
+            ),
+        ),
+        reverse=True,
+    )[:8]
+
+    # ======================================================
+    # PERÍODO DO CABEÇALHO
+    # ======================================================
+
+    nomes_meses = {
+        1: "JAN",
+        2: "FEV",
+        3: "MAR",
+        4: "ABR",
+        5: "MAI",
+        6: "JUN",
+        7: "JUL",
+        8: "AGO",
+        9: "SET",
+        10: "OUT",
+        11: "NOV",
+        12: "DEZ",
+    }
+
+    primeiro_mes = meses_validos[0]
+    ultimo_mes = meses_validos[-1]
+
+    periodo_meses = (
+        nomes_meses[primeiro_mes]
+        if primeiro_mes == ultimo_mes
+        else (
+            f"{nomes_meses[primeiro_mes]}"
+            f"–{nomes_meses[ultimo_mes]}"
+        )
+    )
+
+    if meses_validos == list(range(1, 7)):
+        periodo_titulo = "1º SEMESTRE"
+
+    elif meses_validos == list(range(7, 13)):
+        periodo_titulo = "2º SEMESTRE"
+
+    elif meses_validos == list(range(1, 13)):
+        periodo_titulo = "ANO COMPLETO"
+
+    else:
+        periodo_titulo = "PERÍODO SELECIONADO"
+
+    # ======================================================
+    # RETORNO PARA O POWERPOINT
+    # ======================================================
+
+    return {
+        "periodo_titulo": periodo_titulo,
+        "periodo_meses": periodo_meses,
+        "data_atualizacao": "",
+
+        "indicadores": {
+            "matriculas": {
+                "meta": matriculas_meta,
+                "realizado": matriculas_real,
+                "percentual": calcular_percentual(
+                    matriculas_real,
+                    matriculas_meta,
+                ),
+            },
+
+            "hora_aluno": {
+                "meta": hora_aluno_meta,
+                "realizado": hora_aluno_real,
+                "percentual": calcular_percentual(
+                    hora_aluno_real,
+                    hora_aluno_meta,
+                ),
+            },
+
+            "receita": {
+                "meta": receita_meta,
+                "realizado": receita_real,
+                "percentual": calcular_percentual(
+                    receita_real,
+                    receita_meta,
+                ),
+            },
+        },
+
+        # Serão preenchidos nas próximas etapas.
+        "financiamentos": financiamentos,
+        "programas": programas_status,
+    }
+
+@router.post("/executivo/relatorios/pptx/caravana")
+async def gerar_relatorio_pptx_caravana(
+    request: Request,
+    payload: dict,
+):
+    ano = int(payload.get("ano") or 2026)
+    meses = payload.get("meses") or []
+    regioes = payload.get("regioes") or []
+    subregioes = payload.get("subregioes") or []
+
+    if not regioes:
+        raise HTTPException(
+            status_code=400,
+            detail="Selecione pelo menos uma região.",
+        )
+
+    regioes_normalizadas = [
+        str(regiao).strip().upper()
+        for regiao in regioes
+        if str(regiao).strip()
+    ]
+
+    if not regioes_normalizadas:
+        raise HTTPException(
+            status_code=400,
+            detail="Selecione pelo menos uma região.",
+        )
+
+    if len(regioes_normalizadas) == 1:
+        nome_regiao = regioes_normalizadas[0]
+
+    elif len(regioes_normalizadas) == 2:
+        nome_regiao = (
+            f"{regioes_normalizadas[0]} "
+            f"E {regioes_normalizadas[1]}"
+        )
+
+    else:
+        nome_regiao = (
+            ", ".join(regioes_normalizadas[:-1])
+            + f" E {regioes_normalizadas[-1]}"
+        )
+
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        # ==================================================
+        # DADOS CONSOLIDADOS DA REGIÃO
+        # ==================================================
+
+        dados_panorama = await _buscar_dados_panorama_caravana(
+            conn,
+            ano=ano,
+            meses=meses,
+            regioes=regioes_normalizadas,
+            subregioes=[],
+        )
+
+        # ==================================================
+        # LISTA DAS SUB-REGIÕES
+        # ==================================================
+
+        nomes_subregioes = await _listar_subregioes_caravana(
+            conn,
+            regioes=regioes_normalizadas,
+            subregioes=subregioes,
+        )
+
+        dados_subregioes = []
+
+        for nome_subregiao in nomes_subregioes:
+            # ==============================================
+            # SLIDE PANORAMA DA SUB-REGIÃO
+            # ==============================================
+
+            dados_subregiao = (
+                await _buscar_dados_panorama_caravana(
+                    conn,
+                    ano=ano,
+                    meses=meses,
+                    regioes=regioes_normalizadas,
+                    subregioes=[nome_subregiao],
+                )
+            )
+
+            # ==============================================
+            # SLIDE STATUS DAS METAS DA SUB-REGIÃO
+            # ==============================================
+
+            dados_status_subregiao = (
+                await _buscar_status_metas_subregiao_caravana(
+                    conn,
+                    ano=ano,
+                    meses=meses,
+                    regioes=regioes_normalizadas,
+                    subregiao=nome_subregiao,
+                )
+            )
+
+            dados_subregioes.append(
+                {
+                    "nome": nome_subregiao,
+                    "dados": dados_subregiao,
+                    "status": dados_status_subregiao,
+                }
+            )
+
+    arquivo = gerar_pptx_caravana_base(
+        nome_regiao=nome_regiao,
+        ano=ano,
+        dados_panorama=dados_panorama,
+        dados_subregioes=dados_subregioes,
+    )
+
+    return FileResponse(
+        path=str(arquivo),
+        filename=f"caravana_{ano}.pptx",
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "presentationml.presentation"
+        ),
+    )
+
+@router.get("/performance/evasao/modalidades")
+async def modalidades_evasao_receita(request: Request, ano: int):
+    pool = request.app.state.pool
+
+    sql = """
+    SELECT DISTINCT
+        t.cod_modalidade AS codigo,
+        m.nome AS nome
+    FROM importacao_contratos_pf_linhas l
+    JOIN turmas t
+      ON TRIM(UPPER(t.codigo_sge)) = TRIM(UPPER(l.codturma))
+    JOIN modalidade m
+      ON m.codigo = t.cod_modalidade
+    WHERE l.status IN ('RESOLVIDO', 'FORA_ESCOPO')
+      AND l.valor_liquido IS NOT NULL
+      AND COALESCE(l.valor_liquido, 0) > 0
+      AND l.qtd_parcelas IS NOT NULL
+      AND COALESCE(l.qtd_parcelas, 0) > 0
+      AND EXTRACT(YEAR FROM l.dtinicial)::int <= $1
+      AND EXTRACT(YEAR FROM l.dtfinal)::int >= $1
+    ORDER BY m.nome
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, ano)
+
+    return [dict(r) for r in rows]
+
+@router.get("/performance/evasao")
+async def performance_evasao(request: Request, ano: int, modalidade: int):
+    pool = request.app.state.pool
+
+    sql = """
+    WITH RECURSIVE base AS (
+        SELECT
+            t.codigo_sge,
+            t.cod_modalidade,
+            COALESCE(l.modulo_atual, 0)::int AS modulo_atual,
+            COALESCE(l.qtd_periodos, 0)::int AS qtd_periodos,
+            l.dtinicial::date AS dtinicial,
+            l.dtfinal::date AS dtfinal,
+            COALESCE(l.valor_liquido, 0)::numeric AS valor_liquido,
+            NULLIF(COALESCE(l.qtd_parcelas, 0), 0)::numeric AS qtd_parcelas,
+            COALESCE(tsr.matriculados, 0)
+            + COALESCE(tsr.cancelados, 0)
+            + COALESCE(tsr.desistentes, 0)
+            + COALESCE(tsr.evadidos, 0)
+            + COALESCE(tsr.falecidos, 0) AS qtd_alunos,
+            COALESCE(tsr.desistentes, 0)
+            + COALESCE(tsr.evadidos, 0)
+            + COALESCE(tsr.falecidos, 0) AS qtd_evadidos
+        FROM importacao_contratos_pf_linhas l
+        JOIN turmas t
+        ON TRIM(UPPER(t.codigo_sge)) = TRIM(UPPER(l.codturma))
+        LEFT JOIN turmas_status_resumo tsr
+        ON tsr.cod_turma = t.codigo
+        WHERE l.status IN ('RESOLVIDO', 'FORA_ESCOPO')
+        AND t.cod_modalidade = $2
+        AND COALESCE(l.valor_liquido, 0) > 0
+        AND COALESCE(l.qtd_parcelas, 0) > 0
+        AND NOT (
+            t.cod_modalidade = 15
+            AND COALESCE(l.modulo_atual, 0)::int <> 1
+        )
+    ),
+    periodos AS (
+        SELECT
+            b.*,
+            1 AS modulo_virtual,
+            b.dtinicial AS inicio_periodo,
+            CASE
+                WHEN b.cod_modalidade = 15 THEN (
+                    b.dtinicial
+                    + INTERVAL '6 months'
+                    + CASE
+                        WHEN EXTRACT(MONTH FROM b.dtinicial)::int BETWEEN 7 AND 12
+                        THEN INTERVAL '1 month'
+                        ELSE INTERVAL '0 month'
+                    END
+                )::date
+                ELSE b.dtfinal
+            END AS fim_periodo
+        FROM base b
+
+        UNION ALL
+
+        SELECT
+            p.codigo_sge,
+            p.cod_modalidade,
+            p.modulo_atual,
+            p.qtd_periodos,
+            p.dtinicial,
+            p.dtfinal,
+            p.valor_liquido,
+            p.qtd_parcelas,
+            p.qtd_alunos,
+            p.qtd_evadidos,
+            p.modulo_virtual + 1,
+            (p.fim_periodo + INTERVAL '1 day')::date AS inicio_periodo,
+            (
+                (p.fim_periodo + INTERVAL '1 day')::date
+                + INTERVAL '6 months'
+                + CASE
+                    WHEN EXTRACT(MONTH FROM (p.fim_periodo + INTERVAL '1 day')::date)::int BETWEEN 7 AND 12
+                    THEN INTERVAL '1 month'
+                    ELSE INTERVAL '0 month'
+                END
+            )::date AS fim_periodo
+        FROM periodos p
+        WHERE p.cod_modalidade = 15
+        AND p.modulo_virtual < COALESCE(p.qtd_periodos, 0)::int
+    ),
+    meses AS (
+        SELECT generate_series(1, 12) AS mes
+    )
+    SELECT
+        meses.mes,
+        COALESCE(SUM(
+            CASE
+                WHEN b.qtd_evadidos > 0
+                 AND make_date($1, meses.mes, 1)
+                     BETWEEN date_trunc('month', b.inicio_periodo)::date
+                     AND date_trunc('month', b.fim_periodo)::date    
+                THEN (b.valor_liquido / NULLIF(b.qtd_alunos, 0)) * b.qtd_evadidos
+                ELSE 0
+            END
+        ), 0) AS receita_perdida
+    FROM meses
+    LEFT JOIN periodos b ON TRUE
+    GROUP BY meses.mes
+    ORDER BY meses.mes
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, ano, modalidade)
+
+    nomes_meses = {
+        1: "Jan", 2: "Fev", 3: "Mar", 4: "Abr",
+        5: "Mai", 6: "Jun", 7: "Jul", 8: "Ago",
+        9: "Set", 10: "Out", 11: "Nov", 12: "Dez",
+    }
+
+    # Define até qual mês será considerado realizado.
+    # Ajuste aqui conforme o fechamento real da receita.
+    # Exemplo: se a última receita realizada carregada é maio, use 5.
+    ultimo_mes_realizado = 5
+
+    realizado = []
+    previsao = []
+
+    for r in rows:
+        mes = int(r["mes"])
+        valor = float(r["receita_perdida"] or 0)
+
+        if mes <= ultimo_mes_realizado:
+            realizado.append(valor)
+            previsao.append(None)
+        else:
+            realizado.append(None)
+            previsao.append(valor)
+
+    return {
+        "meses": [nomes_meses[int(r["mes"])] for r in rows],
+        "realizado": realizado,
+        "previsao": previsao,
+    }
+
+@router.get("/performance/evasao/tabela")
+async def performance_evasao_tabela(
+    request: Request,
+    ano: int,
+    modalidade: int | None = None
+):
+    pool = request.app.state.pool
+
+    sql = """
+    WITH RECURSIVE base AS (
+        SELECT
+            t.codigo AS turma_id,
+            t.codigo_sge,
+            t.cod_modalidade,
+            COALESCE(m.nome, 'Sem modalidade') AS modalidade_nome,
+            COALESCE(l.modulo_atual, 0)::int AS modulo_atual,
+            COALESCE(l.qtd_periodos, 0)::int AS qtd_periodos,
+            l.dtinicial::date AS dtinicial,
+            l.dtfinal::date AS dtfinal,
+            COALESCE(l.valor_liquido, 0)::numeric AS valor_liquido,
+            NULLIF(COALESCE(l.qtd_parcelas, 0), 0)::numeric AS qtd_parcelas,
+            COALESCE(tsr.matriculados, 0)
+            + COALESCE(tsr.cancelados, 0)
+            + COALESCE(tsr.desistentes, 0)
+            + COALESCE(tsr.evadidos, 0)
+            + COALESCE(tsr.falecidos, 0) AS qtd_alunos,
+            COALESCE(tsr.desistentes, 0)
+            + COALESCE(tsr.evadidos, 0)
+            + COALESCE(tsr.falecidos, 0) AS qtd_evadidos
+        FROM importacao_contratos_pf_linhas l
+        JOIN turmas t
+        ON TRIM(UPPER(t.codigo_sge)) = TRIM(UPPER(l.codturma))
+        LEFT JOIN modalidade m
+        ON m.codigo = t.cod_modalidade
+        LEFT JOIN turmas_status_resumo tsr
+        ON tsr.cod_turma = t.codigo
+        WHERE l.status IN ('RESOLVIDO', 'FORA_ESCOPO')
+        AND t.cod_modalidade IS NOT NULL
+        AND ($2::int IS NULL OR t.cod_modalidade = $2::int)
+        AND COALESCE(l.valor_liquido, 0) > 0
+        AND COALESCE(l.qtd_parcelas, 0) > 0
+        AND NOT (
+            t.cod_modalidade = 15
+            AND COALESCE(l.modulo_atual, 0)::int <> 1
+        )
+    ),
+    periodos AS (
+        SELECT
+            b.*,
+            1 AS modulo_virtual,
+            b.dtinicial AS inicio_periodo,
+            CASE
+                WHEN b.cod_modalidade = 15 THEN (
+                    b.dtinicial
+                    + INTERVAL '6 months'
+                    + CASE
+                        WHEN EXTRACT(MONTH FROM b.dtinicial)::int BETWEEN 7 AND 12
+                        THEN INTERVAL '1 month'
+                        ELSE INTERVAL '0 month'
+                    END
+                )::date
+                ELSE b.dtfinal
+            END AS fim_periodo
+        FROM base b
+
+        UNION ALL
+
+        SELECT
+            p.turma_id,
+            p.codigo_sge,
+            p.cod_modalidade,
+            p.modalidade_nome,
+            p.modulo_atual,
+            p.qtd_periodos,
+            p.dtinicial,
+            p.dtfinal,
+            p.valor_liquido,
+            p.qtd_parcelas,
+            p.qtd_alunos,
+            p.qtd_evadidos,
+            p.modulo_virtual + 1,
+            (p.fim_periodo + INTERVAL '1 day')::date AS inicio_periodo,
+            (
+                (p.fim_periodo + INTERVAL '1 day')::date
+                + INTERVAL '6 months'
+                + CASE
+                    WHEN EXTRACT(MONTH FROM (p.fim_periodo + INTERVAL '1 day')::date)::int BETWEEN 7 AND 12
+                    THEN INTERVAL '1 month'
+                    ELSE INTERVAL '0 month'
+                END
+            )::date AS fim_periodo
+        FROM periodos p
+        WHERE p.cod_modalidade = 15
+        AND p.modulo_virtual < COALESCE(p.qtd_periodos, 0)::int
+    ),
+    meses AS (
+        SELECT generate_series(1, 12) AS mes
+    ),
+    receita_calculo AS (
+        SELECT
+            b.cod_modalidade,
+            b.modalidade_nome,
+            meses.mes,
+            COALESCE(SUM(
+                CASE
+                    WHEN b.qtd_evadidos > 0
+                    AND make_date($1, meses.mes, 1)
+                        BETWEEN date_trunc('month', b.inicio_periodo)::date
+                        AND date_trunc('month', b.fim_periodo)::date
+                    THEN (b.valor_liquido / NULLIF(b.qtd_alunos, 0)) * b.qtd_evadidos
+                    ELSE 0
+                END
+            ), 0) AS receita_perdida
+        FROM meses
+        JOIN periodos b ON TRUE
+        GROUP BY
+            b.cod_modalidade,
+            b.modalidade_nome,
+            meses.mes
+    ),
+    evadidos_calculo AS (
+        SELECT
+            b.cod_modalidade,
+            b.modalidade_nome,
+            meses.mes,
+            SUM(b.qtd_evadidos) AS evadidos
+        FROM meses
+        JOIN (
+            SELECT DISTINCT ON (turma_id)
+                turma_id,
+                cod_modalidade,
+                modalidade_nome,
+                inicio_periodo,
+                fim_periodo,
+                qtd_evadidos
+            FROM periodos
+            WHERE qtd_evadidos > 0
+            ORDER BY turma_id, inicio_periodo
+        ) b ON TRUE
+        WHERE make_date($1, meses.mes, 1)
+            BETWEEN date_trunc('month', b.inicio_periodo)::date
+            AND date_trunc('month', b.fim_periodo)::date
+        GROUP BY
+            b.cod_modalidade,
+            b.modalidade_nome,
+            meses.mes
+    ),
+    calculo AS (
+        SELECT
+            r.cod_modalidade,
+            r.modalidade_nome,
+            r.mes,
+            COALESCE(e.evadidos, 0) AS evadidos,
+            r.receita_perdida
+        FROM receita_calculo r
+        LEFT JOIN evadidos_calculo e
+        ON e.cod_modalidade = r.cod_modalidade
+        AND e.modalidade_nome = r.modalidade_nome
+        AND e.mes = r.mes
+    )
+    SELECT
+        cod_modalidade,
+        modalidade_nome,
+
+        MAX(CASE WHEN mes = 1 THEN evadidos ELSE 0 END) AS ev_jan,
+        MAX(CASE WHEN mes = 2 THEN evadidos ELSE 0 END) AS ev_fev,
+        MAX(CASE WHEN mes = 3 THEN evadidos ELSE 0 END) AS ev_mar,
+        MAX(CASE WHEN mes = 4 THEN evadidos ELSE 0 END) AS ev_abr,
+        MAX(CASE WHEN mes = 5 THEN evadidos ELSE 0 END) AS ev_mai,
+        MAX(CASE WHEN mes = 6 THEN evadidos ELSE 0 END) AS ev_jun,
+        MAX(CASE WHEN mes = 7 THEN evadidos ELSE 0 END) AS ev_jul,
+        MAX(CASE WHEN mes = 8 THEN evadidos ELSE 0 END) AS ev_ago,
+        MAX(CASE WHEN mes = 9 THEN evadidos ELSE 0 END) AS ev_set,
+        MAX(CASE WHEN mes = 10 THEN evadidos ELSE 0 END) AS ev_out,
+        MAX(CASE WHEN mes = 11 THEN evadidos ELSE 0 END) AS ev_nov,
+        MAX(CASE WHEN mes = 12 THEN evadidos ELSE 0 END) AS ev_dez,
+        (
+            SELECT SUM(x.qtd_evadidos)
+            FROM (
+                SELECT DISTINCT ON (p.turma_id)
+                    p.turma_id,
+                    p.qtd_evadidos
+                FROM periodos p
+                WHERE p.cod_modalidade = calculo.cod_modalidade
+                AND p.qtd_evadidos > 0
+                ORDER BY p.turma_id
+            ) x
+        ) AS ev_total,
+
+        SUM(CASE WHEN mes = 1 THEN receita_perdida ELSE 0 END) AS jan,
+        SUM(CASE WHEN mes = 2 THEN receita_perdida ELSE 0 END) AS fev,
+        SUM(CASE WHEN mes = 3 THEN receita_perdida ELSE 0 END) AS mar,
+        SUM(CASE WHEN mes = 4 THEN receita_perdida ELSE 0 END) AS abr,
+        SUM(CASE WHEN mes = 5 THEN receita_perdida ELSE 0 END) AS mai,
+        SUM(CASE WHEN mes = 6 THEN receita_perdida ELSE 0 END) AS jun,
+        SUM(CASE WHEN mes = 7 THEN receita_perdida ELSE 0 END) AS jul,
+        SUM(CASE WHEN mes = 8 THEN receita_perdida ELSE 0 END) AS ago,
+        SUM(CASE WHEN mes = 9 THEN receita_perdida ELSE 0 END) AS set,
+        SUM(CASE WHEN mes = 10 THEN receita_perdida ELSE 0 END) AS out,
+        SUM(CASE WHEN mes = 11 THEN receita_perdida ELSE 0 END) AS nov,
+        SUM(CASE WHEN mes = 12 THEN receita_perdida ELSE 0 END) AS dez,
+        SUM(receita_perdida) AS total
+    FROM calculo
+    GROUP BY cod_modalidade, modalidade_nome
+    ORDER BY modalidade_nome
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, ano, modalidade)
+
+    return [
+        {
+            "cod_modalidade": r["cod_modalidade"],
+            "modalidade": r["modalidade_nome"],
+            "evadidos": int(r["ev_total"] or 0),
+            "ev_jan": int(r["ev_jan"] or 0),
+            "ev_fev": int(r["ev_fev"] or 0),
+            "ev_mar": int(r["ev_mar"] or 0),
+            "ev_abr": int(r["ev_abr"] or 0),
+            "ev_mai": int(r["ev_mai"] or 0),
+            "ev_jun": int(r["ev_jun"] or 0),
+            "ev_jul": int(r["ev_jul"] or 0),
+            "ev_ago": int(r["ev_ago"] or 0),
+            "ev_set": int(r["ev_set"] or 0),
+            "ev_out": int(r["ev_out"] or 0),
+            "ev_nov": int(r["ev_nov"] or 0),
+            "ev_dez": int(r["ev_dez"] or 0),
+            "ev_total": int(r["ev_total"] or 0),
+            "jan": float(r["jan"] or 0),
+            "fev": float(r["fev"] or 0),
+            "mar": float(r["mar"] or 0),
+            "abr": float(r["abr"] or 0),
+            "mai": float(r["mai"] or 0),
+            "jun": float(r["jun"] or 0),
+            "jul": float(r["jul"] or 0),
+            "ago": float(r["ago"] or 0),
+            "set": float(r["set"] or 0),
+            "out": float(r["out"] or 0),
+            "nov": float(r["nov"] or 0),
+            "dez": float(r["dez"] or 0),
+            "total": float(r["total"] or 0),
+        }
+        for r in rows
+    ]
