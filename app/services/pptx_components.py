@@ -6444,8 +6444,39 @@ def tabela_programas_status(
 
     programas = programas or []
 
-    # Exibe somente os seis principais programas.
-    programas_exibidos = programas[:6]
+    # ======================================================
+    # ORDENA PELO % ATINGIDO DE MATRÍCULAS
+    # MAIOR → MENOR
+    # ======================================================
+
+    def percentual_atingido_programa(item) -> float:
+        try:
+            dados_matriculas = item.get(
+                "matriculas",
+                {},
+            )
+
+            return float(
+                dados_matriculas.get(
+                    "percentual",
+                    0,
+                )
+                or 0
+            )
+
+        except (TypeError, ValueError):
+            return 0.0
+
+
+    programas_ordenados = sorted(
+        programas,
+        key=percentual_atingido_programa,
+        reverse=True,
+    )
+
+    # Exibe somente os seis primeiros
+    # depois de ordenar pelo % atingido.
+    programas_exibidos = programas_ordenados[:6]
 
     # ======================================================
     # FUNÇÕES AUXILIARES
