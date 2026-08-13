@@ -9794,6 +9794,9 @@ async def performance_preditiva(
                 GROUP BY md.codigo
             ),
 
+            
+
+
             realizado AS (
                 SELECT
                     ofi.cod_modalidade,
@@ -10420,6 +10423,78 @@ async def performance_preditiva(
                 GROUP BY md.codigo
             ),
 
+                    meta_mensal AS (
+            SELECT
+                md.codigo AS cod_modalidade,
+                vm.mes,
+
+                COALESCE(
+                    SUM(vm.valor),
+                    0
+                ) AS valor
+
+            FROM planejamento_staging ps
+
+            JOIN modalidade md
+                ON UPPER(
+                    TRIM(
+                        COALESCE(md.nome::text, '')
+                    )
+                ) =
+                UPPER(
+                    TRIM(
+                        COALESCE(ps.modalidade_raw::text, '')
+                    )
+                )
+
+            CROSS JOIN LATERAL (
+                VALUES
+                    (1,  COALESCE(ps.jan, 0)),
+                    (2,  COALESCE(ps.fev, 0)),
+                    (3,  COALESCE(ps.mar, 0)),
+                    (4,  COALESCE(ps.abr, 0)),
+                    (5,  COALESCE(ps.mai, 0)),
+                    (6,  COALESCE(ps.jun, 0)),
+                    (7,  COALESCE(ps.jul, 0)),
+                    (8,  COALESCE(ps.ago, 0)),
+                    (9,  COALESCE(ps.set_, 0)),
+                    (10, COALESCE(ps.out_, 0)),
+                    (11, COALESCE(ps.nov, 0)),
+                    (12, COALESCE(ps.dez, 0))
+            ) AS vm(mes, valor)
+
+            WHERE ps.lote_id = (
+                SELECT id
+                FROM planejamento_import_lotes
+                WHERE CAST(ano_referencia AS integer) = $1
+                  AND status_processamento = 'processado'
+                ORDER BY id DESC
+                LIMIT 1
+            )
+
+            AND ps.flag_valida = TRUE
+
+            AND UPPER(
+                TRIM(
+                    COALESCE(ps.tipo::text, '')
+                )
+            ) = 'META'
+
+            AND UPPER(
+                TRIM(
+                    COALESCE(ps.conta::text, '')
+                )
+            ) IN (
+                'RECEITAS CORRENTES',
+                'RECEITA',
+                'RECEITAS'
+            )
+
+            GROUP BY
+                md.codigo,
+                vm.mes
+        ),
+
             realizado AS (
                 SELECT
                     ofi.cod_modalidade,
@@ -10472,6 +10547,11 @@ async def performance_preditiva(
                     0
                 ) AS meta,
 
+                COALESCE(
+                    mmm.valor,
+                    0
+                ) AS meta_mensal,
+
                 rl.valor AS realizado,
 
                 COALESCE(
@@ -10492,6 +10572,11 @@ async def performance_preditiva(
                 ON pj.cod_modalidade =
                 me.cod_modalidade
             AND pj.mes = m.mes
+
+            LEFT JOIN meta_mensal mmm
+                ON mmm.cod_modalidade =
+                me.cod_modalidade
+            AND mmm.mes = m.mes
 
             LEFT JOIN meta_modalidade mm
                 ON mm.cod_modalidade =
@@ -10533,6 +10618,10 @@ async def performance_preditiva(
 
             modalidades[codigo]["serie"].append({
                 "mes": int(row["mes"]),
+
+                "meta_mensal": float(
+                    row["meta_mensal"] or 0
+                ),
 
                 "realizado": (
                     None
@@ -10952,6 +11041,10 @@ async def performance_preditiva(
             await buscar_serie_receita_modalidade()
         )
 
+        contratos_modalidade = (
+            await buscar_receita_contratada_modalidade()
+        )
+
         resultado = []
 
         nomes_campos = [
@@ -11036,6 +11129,23 @@ async def performance_preditiva(
                     else None
                 )
 
+                meta_mensal = NumberOrZero(
+                    registro.get("meta_mensal")
+                    if registro
+                    else 0
+                )
+
+                contratado = NumberOrZero(
+                    contratos_modalidade
+                        .get(codigo, {})
+                        .get(mes, 0)
+                )
+
+                diferenca = max(
+                    meta_mensal - contratado,
+                    0
+                )
+
                 projetado_banco = (
                     NumberOrZero(
                         registro["projetado"]
@@ -11049,26 +11159,34 @@ async def performance_preditiva(
                     valor = NumberOrZero(realizado)
                     tipo = "realizado"
 
-                # Meses futuros: receita projetada
+                # Meses futuros: receita contratada + gap para a meta
                 else:
-                    if projetado_banco > 0:
-                        valor = projetado_banco
-
-                    elif media_realizada > 0:
-                        valor = media_realizada
-
-                    else:
-                        valor = 0
+                    valor = contratado
 
                     tipo = (
-                        "projecao"
-                        if valor > 0
+                        "contratado"
+                        if contratado > 0
                         else "sem_dado"
                     )
 
                 linha[nome_mes] = {
                     "valor": round(valor, 2),
-                    "tipo": tipo
+                    "tipo": tipo,
+
+                    "meta_mensal": round(
+                        meta_mensal,
+                        2
+                    ),
+
+                    "contratado": round(
+                        contratado,
+                        2
+                    ),
+
+                    "diferenca": round(
+                        diferenca,
+                        2
+                    )
                 }
 
                 total += valor
@@ -11124,6 +11242,320 @@ async def performance_preditiva(
                 linha.get("modalidade") or ""
             ).casefold()
         )
+
+        return resultado
+
+    async def buscar_receita_contratada_modalidade():
+        params = [ano]
+        idx = 2
+
+        filtro_sub = ""
+        filtro_prog = ""
+        filtro_regiao = ""
+
+        if ids_sub:
+            filtro_sub = f" AND u.cod_subregiao = ANY(${idx}::int[])"
+            params.append(ids_sub)
+            idx += 1
+
+        if regiao:
+            filtro_regiao = f"""
+                AND EXISTS (
+                    SELECT 1
+                    FROM subregioes sr
+                    JOIN regioes rg
+                        ON rg.codigo = sr.codigo_regiao
+                    WHERE sr.codigo = u.cod_subregiao
+                    AND UPPER(TRIM(rg.nome)) = UPPER(TRIM(${idx}))
+                )
+            """
+            params.append(regiao)
+            idx += 1
+
+        if ids_prog_txt:
+            filtro_prog = f"""
+                AND TRIM(
+                    COALESCE(t.cod_programa::text, '')
+                ) = ANY(${idx}::text[])
+            """
+            params.append(ids_prog_txt)
+            idx += 1
+
+        sql = f"""
+            WITH RECURSIVE meses AS (
+                SELECT generate_series(1, 12) AS mes
+            ),
+
+            base AS (
+                SELECT
+                    l.codturma,
+                    l.valor_liquido,
+                    l.qtd_parcelas,
+                    l.qtd_matriculados,
+                    l.qtd_periodos,
+                    l.modulo_atual,
+                    l.dtinicial::date AS dtinicial,
+                    l.dtfinal::date AS dtfinal,
+                    t.cod_modalidade,
+                    u.cod_subregiao,
+                    t.cod_programa
+
+                FROM importacao_contratos_pf_linhas l
+
+                JOIN turmas t
+                    ON TRIM(UPPER(t.codigo_sge))
+                    = TRIM(UPPER(l.codturma))
+
+                JOIN uo u
+                    ON u.codigo = t.cod_uo
+
+                WHERE l.status IN (
+                    'RESOLVIDO',
+                    'FORA_ESCOPO'
+                )
+
+                AND NOT (
+                    t.cod_modalidade = 15
+                    AND COALESCE(l.modulo_atual, 0) <> 1
+                )
+
+                {filtro_sub}
+                {filtro_regiao}
+                {filtro_prog}
+            ),
+
+            periodos_virtuais AS (
+                SELECT
+                    b.codturma,
+                    b.valor_liquido,
+                    b.qtd_parcelas,
+                    b.qtd_matriculados,
+                    b.qtd_periodos,
+                    b.modulo_atual,
+                    b.dtinicial,
+                    b.dtfinal,
+                    b.cod_modalidade,
+
+                    1 AS periodo_virtual,
+
+                    b.dtinicial AS inicio_periodo,
+
+                    (
+                        b.dtinicial
+                        + INTERVAL '6 months'
+                        + CASE
+                            WHEN EXTRACT(
+                                MONTH FROM b.dtinicial
+                            )::int BETWEEN 7 AND 12
+                            THEN INTERVAL '1 month'
+                            ELSE INTERVAL '0 month'
+                        END
+                    )::date AS fim_periodo
+
+                FROM base b
+
+                WHERE b.cod_modalidade = 15
+
+                UNION ALL
+
+                SELECT
+                    pv.codturma,
+                    pv.valor_liquido,
+                    pv.qtd_parcelas,
+                    pv.qtd_matriculados,
+                    pv.qtd_periodos,
+                    pv.modulo_atual,
+                    pv.dtinicial,
+                    pv.dtfinal,
+                    pv.cod_modalidade,
+
+                    pv.periodo_virtual + 1,
+
+                    (
+                        pv.fim_periodo
+                        + INTERVAL '1 day'
+                    )::date AS inicio_periodo,
+
+                    (
+                        (
+                            pv.fim_periodo
+                            + INTERVAL '1 day'
+                        )::date
+                        + INTERVAL '6 months'
+                        + CASE
+                            WHEN EXTRACT(
+                                MONTH FROM (
+                                    pv.fim_periodo
+                                    + INTERVAL '1 day'
+                                )::date
+                            )::int BETWEEN 7 AND 12
+                            THEN INTERVAL '1 month'
+                            ELSE INTERVAL '0 month'
+                        END
+                    )::date AS fim_periodo
+
+                FROM periodos_virtuais pv
+
+                WHERE pv.periodo_virtual
+                    < COALESCE(
+                        pv.qtd_periodos,
+                        0
+                    )::int
+            ),
+
+            contratos AS (
+
+                SELECT
+                    b.cod_modalidade,
+                    m.mes,
+
+                    SUM(
+                        ROUND(
+                            (
+                                COALESCE(
+                                    b.valor_liquido,
+                                    0
+                                )
+                                /
+                                NULLIF(
+                                    COALESCE(
+                                        b.qtd_parcelas,
+                                        0
+                                    ),
+                                    0
+                                )
+                            )::numeric,
+                            2
+                        )
+                        *
+                        COALESCE(
+                            b.qtd_matriculados,
+                            0
+                        )
+                    ) AS valor
+
+                FROM meses m
+
+                JOIN base b
+                    ON b.cod_modalidade <> 15
+
+                AND b.dtinicial <= (
+                        MAKE_DATE(
+                            $1,
+                            m.mes,
+                            1
+                        )
+                        + INTERVAL '1 month'
+                        - INTERVAL '1 day'
+                )
+
+                AND b.dtfinal >= MAKE_DATE(
+                        $1,
+                        m.mes,
+                        1
+                )
+
+                GROUP BY
+                    b.cod_modalidade,
+                    m.mes
+
+
+                UNION ALL
+
+
+                SELECT
+                    pv.cod_modalidade,
+                    m.mes,
+
+                    SUM(
+                        ROUND(
+                            (
+                                COALESCE(
+                                    pv.valor_liquido,
+                                    0
+                                )
+                                /
+                                NULLIF(
+                                    COALESCE(
+                                        pv.qtd_parcelas,
+                                        0
+                                    ),
+                                    0
+                                )
+                            )::numeric,
+                            2
+                        )
+                        *
+                        COALESCE(
+                            pv.qtd_matriculados,
+                            0
+                        )
+                    ) AS valor
+
+                FROM meses m
+
+                JOIN periodos_virtuais pv
+                    ON pv.inicio_periodo <= (
+                        MAKE_DATE(
+                            $1,
+                            m.mes,
+                            1
+                        )
+                        + INTERVAL '1 month'
+                        - INTERVAL '1 day'
+                    )
+
+                AND pv.fim_periodo >= MAKE_DATE(
+                        $1,
+                        m.mes,
+                        1
+                )
+
+                GROUP BY
+                    pv.cod_modalidade,
+                    m.mes
+            )
+
+            SELECT
+                cod_modalidade,
+                mes,
+                COALESCE(
+                    SUM(valor),
+                    0
+                ) AS valor
+
+            FROM contratos
+
+            GROUP BY
+                cod_modalidade,
+                mes
+
+            ORDER BY
+                cod_modalidade,
+                mes
+        """
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                sql,
+                *params
+            )
+
+        resultado = {}
+
+        for row in rows:
+            codigo = int(
+                row["cod_modalidade"]
+            )
+
+            if codigo not in resultado:
+                resultado[codigo] = {}
+
+            resultado[codigo][
+                int(row["mes"])
+            ] = float(
+                row["valor"] or 0
+            )
 
         return resultado
 
@@ -17380,6 +17812,7 @@ async def processar_contratos_pf(request: Request, lote_id: int):
 
         atualizadas = 0
         criadas_uo = 0
+        sem_movimento_total = 0
         erros = 0
 
         for r in rows:
@@ -17432,6 +17865,7 @@ async def processar_contratos_pf(request: Request, lote_id: int):
                 )
 
                 if not turma:
+                    # 1. Turma encerrada antes de 2026
                     if r["dtfinal"] and r["dtfinal"] < date(2026, 1, 1):
                         await conn.execute(
                             """
@@ -17445,15 +17879,39 @@ async def processar_contratos_pf(request: Request, lote_id: int):
                         )
                         continue
 
+                    # 2. Turma não encontrada, mas sem movimento contratual
+                    sem_movimento = (
+                        (r["qtd_matriculados"] or 0) == 0
+                        and (r["qtd_contratos"] or 0) == 0
+                        and (r["valor_liquido"] or 0) == 0
+                    )
+
+                    if sem_movimento:
+                        await conn.execute(
+                            """
+                            UPDATE importacao_contratos_pf_linhas
+                            SET status = 'SEM_MOVIMENTO',
+                                processado = TRUE,
+                                erro = 'Turma não encontrada na tabela turmas, mas sem matrículas, contratos ou valor líquido.'
+                            WHERE id = $1
+                            """,
+                            r["id"]
+                        )
+                        sem_movimento_total += 1
+                        continue
+
+                    # 3. Turma não encontrada e possui movimento contratual
                     await conn.execute(
                         """
                         UPDATE importacao_contratos_pf_linhas
                         SET status = 'ERRO',
-                            erro = 'Turma não encontrada na tabela turmas pelo CODTURMA.'
+                            processado = TRUE,
+                            erro = 'Turma não encontrada na tabela turmas pelo CODTURMA e possui movimento contratual.'
                         WHERE id = $1
                         """,
                         r["id"]
                     )
+
                     erros += 1
                     continue
 
@@ -17503,7 +17961,7 @@ async def processar_contratos_pf(request: Request, lote_id: int):
             SELECT COUNT(*)
             FROM importacao_contratos_pf_linhas
             WHERE lote_id = $1
-              AND status IN ('RESOLVIDO', 'ERRO', 'FORA_ESCOPO')
+              AND status IN ('RESOLVIDO', 'ERRO', 'FORA_ESCOPO', 'SEM_MOVIMENTO')
             """,
             lote_id
         )
@@ -17524,6 +17982,7 @@ async def processar_contratos_pf(request: Request, lote_id: int):
         "linhas_avaliadas": len(rows),
         "atualizadas": atualizadas,
         "criadas_uo": criadas_uo,
+        "sem_movimento": sem_movimento_total,
         "erros": erros
     }
 
