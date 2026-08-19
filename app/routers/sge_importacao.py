@@ -2453,6 +2453,411 @@ async def processar_receita(request: Request, lote_id: int):
             "erros": int(resumo["erros"] or 0),
         }
     
+@router.post("/importacoes/hora-aluno-previsao")
+async def importar_hora_aluno_previsao(
+    request: Request,
+    arquivo: UploadFile = File(...)
+):
+    if not arquivo.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="Arquivo não informado."
+        )
+
+    nome = arquivo.filename.lower()
+
+    if not (
+        nome.endswith(".xlsx")
+        or nome.endswith(".xls")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Envie um arquivo Excel .xlsx ou .xls."
+        )
+
+    conteudo = await arquivo.read()
+
+    try:
+        df = pd.read_excel(
+            io.BytesIO(conteudo)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Erro ao ler Excel: {e}"
+        )
+
+    # =====================================================
+    # NORMALIZA NOMES DAS COLUNAS
+    # =====================================================
+
+    df.columns = [
+        str(c)
+        .replace("\xa0", " ")
+        .strip()
+        .upper()
+        for c in df.columns
+    ]
+
+    colunas_obrigatorias = [
+        "MES_REFERENCIA_SI",
+        "CODFILIAL",
+        "MATRICULA",
+        "RA",
+        "TURMA",
+        "HRALUNO",
+        "HRALUNO_EAD",
+        "MODALIDADE",
+        "STATUS_MATRICULA_CUR",
+        "ITEM_CONTABIL",
+        "TIPO_FINANCIAMENTO",
+    ]
+
+    faltantes = [
+        c
+        for c in colunas_obrigatorias
+        if c not in df.columns
+    ]
+
+    if faltantes:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Colunas obrigatórias ausentes: "
+                + ", ".join(faltantes)
+            )
+        )
+
+    # =====================================================
+    # IDENTIFICA A COMPETÊNCIA
+    # =====================================================
+
+    competencias = (
+        pd.to_datetime(
+            df["MES_REFERENCIA_SI"],
+            errors="coerce"
+        )
+        .dropna()
+        .dt.to_period("M")
+        .unique()
+    )
+
+    if len(competencias) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Não foi possível identificar a competência do arquivo."
+        )
+
+    if len(competencias) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "O arquivo possui mais de uma competência em "
+                "MES_REFERENCIA_SI."
+            )
+        )
+
+    competencia = competencias[0]
+
+    competencia_ano = int(
+        competencia.year
+    )
+
+    competencia_mes = int(
+        competencia.month
+    )
+
+    # =====================================================
+    # FUNÇÃO AUXILIAR PARA HORA-ALUNO
+    # =====================================================
+
+    def valor_decimal(v):
+        if pd.isna(v) or v in ("", None):
+            return Decimal("0")
+
+        try:
+            return Decimal(
+                str(v)
+                .strip()
+                .replace(",", ".")
+            )
+        except Exception:
+            return Decimal("0")
+
+    # =====================================================
+    # PREPARA AS LINHAS
+    # =====================================================
+
+    registros = []
+
+    total_linhas = 0
+    linhas_validas = 0
+    linhas_ignoradas = 0
+
+    ha_presencial_total = Decimal("0")
+    ha_ead_total = Decimal("0")
+
+    for idx, row in df.iterrows():
+
+        linha_numero = idx + 2
+        total_linhas += 1
+
+        matricula = norm_text(
+            row.get("MATRICULA")
+        )
+
+        ra = norm_text(
+            row.get("RA")
+        )
+
+        turma = norm_text(
+            row.get("TURMA")
+        )
+
+        codfilial = norm_text(
+            row.get("CODFILIAL")
+        )
+
+        modalidade = norm_text(
+            row.get("MODALIDADE")
+        )
+
+        item_contabil = norm_text(
+            row.get("ITEM_CONTABIL")
+        )
+
+        tipo_financiamento = norm_text(
+            row.get("TIPO_FINANCIAMENTO")
+        )
+
+        tipo_financiamento_normalizado = (
+            tipo_financiamento
+            .strip()
+            .upper()
+            if tipo_financiamento
+            else ""
+        )
+
+        mapa_financiamento = {
+            "GRATUIDADE REGIMENTAL": 1,
+            "GRATUIDADE NÃO REGIMENTAL": 2,
+            "GRATUIDADE NAO REGIMENTAL": 2,
+            "PAGOR POR PESSOA FÍSICA OU EMPRESA": 3,
+            "PAGOR POR PESSOA FISICA OU EMPRESA": 3,
+            "PAGO POR PESSOA FÍSICA OU EMPRESA": 3,
+            "PAGO POR PESSOA FISICA OU EMPRESA": 3,
+            "OUTRO": 4,
+            "NOVO BRASIL + PRODUTIVO": 6,
+        }
+
+        cod_financiamento = (
+            mapa_financiamento.get(
+                tipo_financiamento_normalizado
+            )
+        )
+
+        status_matricula = norm_text(
+            row.get("STATUS_MATRICULA_CUR")
+        )
+
+        hraluno = valor_decimal(
+            row.get("HRALUNO")
+        )
+
+        hraluno_ead = valor_decimal(
+            row.get("HRALUNO_EAD")
+        )
+
+        ha_total = (
+            hraluno
+            + hraluno_ead
+        )
+
+        # =================================================
+        # REGRA DE APROPRIAÇÃO
+        # =================================================
+
+        flag_valida = True
+        motivo_ignorado = None
+
+        status_normalizado = (
+            status_matricula
+            .strip()
+            .upper()
+            if status_matricula
+            else ""
+        )
+
+        # Pré-matriculado nunca entra
+        if status_normalizado in (
+            "PRÉ-MATRICULADO",
+            "PRE-MATRICULADO",
+            "PRÉ_MATRICULADO",
+            "PRE_MATRICULADO",
+        ):
+            flag_valida = False
+            motivo_ignorado = (
+                "Pré-matriculado"
+            )
+
+        # Sem HA também não compõe a previsão
+        elif ha_total <= 0:
+            flag_valida = False
+            motivo_ignorado = (
+                "Sem hora-aluno"
+            )
+
+        if flag_valida:
+            linhas_validas += 1
+
+            ha_presencial_total += (
+                hraluno
+            )
+
+            ha_ead_total += (
+                hraluno_ead
+            )
+
+        else:
+            linhas_ignoradas += 1
+
+        registros.append(
+            (
+                competencia_mes,
+                competencia_ano,
+                matricula,
+                turma,
+                codfilial,
+                modalidade,
+                item_contabil,
+                status_matricula,
+                hraluno,
+                hraluno_ead,
+                flag_valida,
+                motivo_ignorado,
+                linha_numero,
+                ra,
+                tipo_financiamento,
+                cod_financiamento,
+            )
+        )
+
+    # =====================================================
+    # GRAVA NO BANCO
+    # =====================================================
+
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+
+        async with conn.transaction():
+
+            lote = await conn.fetchrow(
+                """
+                INSERT INTO importacao_ha_previsao_lotes (
+                    nome_arquivo,
+                    competencia_mes,
+                    competencia_ano,
+                    status_processamento,
+                    total_linhas,
+                    linhas_validas,
+                    linhas_ignoradas,
+                    ha_presencial,
+                    ha_ead,
+                    ha_total
+                )
+                VALUES (
+                    $1,
+                    $2,
+                    $3,
+                    'importado',
+                    $4,
+                    $5,
+                    $6,
+                    $7,
+                    $8,
+                    $9
+                )
+                RETURNING id
+                """,
+                arquivo.filename,
+                competencia_mes,
+                competencia_ano,
+                total_linhas,
+                linhas_validas,
+                linhas_ignoradas,
+                ha_presencial_total,
+                ha_ead_total,
+                (
+                    ha_presencial_total
+                    + ha_ead_total
+                ),
+            )
+
+            lote_id = lote["id"]
+
+            registros_com_lote = [
+                (
+                    lote_id,
+                    *r
+                )
+                for r in registros
+            ]
+
+            if registros_com_lote:
+
+                await conn.executemany(
+                    """
+                    INSERT INTO importacao_ha_previsao_linhas (
+                        lote_id,
+                        competencia_mes,
+                        competencia_ano,
+                        matricula,
+                        turma,
+                        codfilial,
+                        modalidade,
+                        item_contabil,
+                        status_matricula_cur,
+                        hraluno,
+                        hraluno_ead,
+                        flag_valida,
+                        motivo_ignorado,
+                        linha_numero,
+                        ra,
+                        tipo_financiamento,
+                        cod_financiamento
+                    )
+                    VALUES (
+                        $1,$2,$3,$4,$5,
+                        $6,$7,$8,$9,$10,
+                        $11,$12,$13,$14,$15,
+                        $16,$17
+                    )
+                    """,
+                    registros_com_lote
+                )
+
+    return {
+        "ok": True,
+        "lote_id": lote_id,
+        "arquivo": arquivo.filename,
+        "competencia_ano": competencia_ano,
+        "competencia_mes": competencia_mes,
+        "total_linhas": total_linhas,
+        "linhas_validas": linhas_validas,
+        "linhas_ignoradas": linhas_ignoradas,
+        "ha_presencial": float(
+            ha_presencial_total
+        ),
+        "ha_ead": float(
+            ha_ead_total
+        ),
+        "ha_total": float(
+            ha_presencial_total
+            + ha_ead_total
+        ),
+    }
+    
 @router.post("/importacoes/hora-aluno")
 async def importar_hora_aluno(request: Request, arquivo: UploadFile = File(...), ano_referencia: int = 2026):
     if not arquivo.filename:
@@ -10869,6 +11274,119 @@ async def performance_preditiva(
             await buscar_serie_hora_aluno_modalidade()
         )
 
+        # =========================================================
+        # HA GARANTIDA POR MODALIDADE
+        # Respeita os mesmos filtros da análise preditiva
+        # =========================================================
+
+        ha_garantida_modalidade = {}
+
+        params_ha = [ano]
+        idx_ha = 2
+        filtros_ha = []
+
+        # SUB-REGIÃO
+        if ids_sub:
+            filtros_ha.append(
+                f"u.cod_subregiao = ANY(${idx_ha}::int[])"
+            )
+            params_ha.append(ids_sub)
+            idx_ha += 1
+
+        # REGIÃO
+        if regiao:
+            filtros_ha.append(
+                f"""
+                EXISTS (
+                    SELECT 1
+                    FROM subregioes sr
+                    JOIN regioes rg
+                        ON rg.codigo = sr.codigo_regiao
+                    WHERE sr.codigo = u.cod_subregiao
+                      AND UPPER(TRIM(rg.nome)) =
+                          UPPER(TRIM(${idx_ha}))
+                )
+                """
+            )
+            params_ha.append(regiao)
+            idx_ha += 1
+
+        # PROGRAMA
+        if ids_prog_txt:
+            filtros_ha.append(
+                f"""
+                (
+                    CASE
+                        WHEN h.cod_programa = 29 THEN '11'
+                        WHEN h.cod_programa = 30 THEN '7'
+                        ELSE TRIM(
+                            COALESCE(
+                                h.cod_programa::text,
+                                ''
+                            )
+                        )
+                    END
+                ) = ANY(${idx_ha}::text[])
+                """
+            )
+            params_ha.append(ids_prog_txt)
+            idx_ha += 1
+
+        where_ha = ""
+
+        if filtros_ha:
+            where_ha = (
+                " AND "
+                + " AND ".join(filtros_ha)
+            )
+
+        sql_ha_garantida = f"""
+            SELECT
+                h.cod_modalidade,
+                h.competencia_mes,
+                SUM(h.ha_total) AS valor
+
+            FROM vw_ha_previsao_resolvida h
+
+            JOIN uo u
+                ON u.codigo = h.cod_uo
+
+            WHERE h.competencia_ano = $1
+            {where_ha}
+
+            GROUP BY
+                h.cod_modalidade,
+                h.competencia_mes
+
+            ORDER BY
+                h.cod_modalidade,
+                h.competencia_mes
+        """
+
+        async with pool.acquire() as conn:
+            rows_ha_garantida = await conn.fetch(
+                sql_ha_garantida,
+                *params_ha
+            )
+
+        for row in rows_ha_garantida:
+            cod_modalidade = int(
+                row["cod_modalidade"]
+            )
+
+            mes = int(
+                row["competencia_mes"]
+            )
+
+            valor = NumberOrZero(
+                row["valor"]
+            )
+
+            ha_garantida_modalidade.setdefault(
+                cod_modalidade,
+                {}
+            )[mes] = valor
+
         resultado = []
 
         nomes_campos = [
@@ -10963,17 +11481,14 @@ async def performance_preditiva(
                     tipo = "realizado"
 
                 else:
-                    if projetado_banco > 0:
-                        valor = projetado_banco
-
-                    elif media_realizada > 0:
-                        valor = media_realizada
-
-                    else:
-                        valor = 0
+                    valor = NumberOrZero(
+                        ha_garantida_modalidade
+                        .get(int(codigo), {})
+                        .get(mes, 0)
+                    )
 
                     tipo = (
-                        "projecao"
+                        "garantida"
                         if valor > 0
                         else "sem_dado"
                     )
@@ -11032,6 +11547,231 @@ async def performance_preditiva(
             key=lambda linha: (
                 linha.get("modalidade") or ""
             ).casefold()
+        )
+
+        return resultado
+    
+    async def montar_hora_aluno_modalidade_financiamento():
+        async with pool.acquire() as conn:
+            linhas = await conn.fetch(
+            """
+            WITH metas AS (
+                SELECT
+                    ano,
+                    cod_modalidade,
+                    cod_financiamento,
+                    SUM(
+                        COALESCE(qtd_hora_aluno, 0)
+                    ) AS meta_ha
+
+                FROM ofertas_programas
+
+                WHERE ano = $1
+
+                GROUP BY
+                    ano,
+                    cod_modalidade,
+                    cod_financiamento
+            )
+
+            SELECT
+                h.ano,
+                h.mes,
+                h.cod_modalidade,
+                h.modalidade,
+                h.cod_financiamento,
+                h.financiamento,
+                h.tipo,
+                h.ha_total,
+
+                COALESCE(
+                    m.meta_ha,
+                    0
+                ) AS meta_ha
+
+            FROM vw_ha_modalidade_financiamento h
+
+            LEFT JOIN metas m
+                ON m.ano = h.ano
+            AND m.cod_modalidade = h.cod_modalidade
+            AND m.cod_financiamento IS NOT DISTINCT FROM h.cod_financiamento
+
+            WHERE h.ano = $1
+
+            ORDER BY
+                h.modalidade,
+                h.cod_financiamento,
+                h.mes
+            """,
+            ano,
+        )
+
+        meses_campos = {
+            1: "jan",
+            2: "fev",
+            3: "mar",
+            4: "abr",
+            5: "mai",
+            6: "jun",
+            7: "jul",
+            8: "ago",
+            9: "set",
+            10: "out",
+            11: "nov",
+            12: "dez",
+        }
+
+        agrupado = {}
+
+        for registro in linhas:
+            cod_modalidade = registro["cod_modalidade"]
+            cod_financiamento = registro["cod_financiamento"]
+
+            chave = (
+                cod_modalidade,
+                cod_financiamento,
+            )
+
+            if chave not in agrupado:
+                agrupado[chave] = {
+                    "codigo_modalidade": cod_modalidade,
+                    "modalidade": registro["modalidade"],
+                    "codigo_financiamento": cod_financiamento,
+                    "financiamento": registro["financiamento"],
+                    "meta": round(
+                        NumberOrZero(
+                            registro["meta_ha"]
+                        ),
+                        2,
+                    ),
+
+                    "jan": {
+                        "valor": 0,
+                        "tipo": "sem_dado",
+                    },
+
+                    "fev": {
+                        "valor": 0,
+                        "tipo": "sem_dado",
+                    },
+
+                    "mar": {
+                        "valor": 0,
+                        "tipo": "sem_dado",
+                    },
+
+                    "abr": {
+                        "valor": 0,
+                        "tipo": "sem_dado",
+                    },
+
+                    "mai": {
+                        "valor": 0,
+                        "tipo": "sem_dado",
+                    },
+
+                    "jun": {
+                        "valor": 0,
+                        "tipo": "sem_dado",
+                    },
+
+                    "jul": {
+                        "valor": 0,
+                        "tipo": "sem_dado",
+                    },
+
+                    "ago": {
+                        "valor": 0,
+                        "tipo": "sem_dado",
+                    },
+
+                    "set": {
+                        "valor": 0,
+                        "tipo": "sem_dado",
+                    },
+
+                    "out": {
+                        "valor": 0,
+                        "tipo": "sem_dado",
+                    },
+
+                    "nov": {
+                        "valor": 0,
+                        "tipo": "sem_dado",
+                    },
+
+                    "dez": {
+                        "valor": 0,
+                        "tipo": "sem_dado",
+                    },
+
+                    "total": 0,
+                }
+
+            mes = int(
+                registro["mes"]
+            )
+
+            campo_mes = meses_campos.get(
+                mes
+            )
+
+            if not campo_mes:
+                continue
+
+            valor = NumberOrZero(
+                registro["ha_total"]
+            )
+
+            tipo = (
+                registro["tipo"]
+                or "sem_dado"
+            )
+
+            agrupado[chave][campo_mes] = {
+                "valor": round(
+                    valor,
+                    2,
+                ),
+                "tipo": tipo,
+            }
+
+            agrupado[chave]["total"] += valor
+
+        resultado = list(
+            agrupado.values()
+        )
+
+        for item in resultado:
+            item["total"] = round(
+                NumberOrZero(
+                    item["total"]
+                ),
+                2,
+            )
+
+        ordem_financiamento = {
+            1: 1,   # GR
+            2: 2,   # GNR
+            3: 3,   # PG
+            6: 4,   # Novo Brasil + Produtivo
+            9: 5,   # Pronatec
+        }
+
+        resultado.sort(
+            key=lambda item: (
+                (
+                    item.get("modalidade")
+                    or ""
+                ).casefold(),
+
+                ordem_financiamento.get(
+                    item.get(
+                        "codigo_financiamento"
+                    ),
+                    99,
+                ),
+            )
         )
 
         return resultado
@@ -11760,6 +12500,132 @@ async def performance_preditiva(
             round(mapa.get(mes, 0), 2)
             for mes in range(1, 13)
         ]
+    
+    async def buscar_ha_garantida():
+        params = [ano]
+        idx = 2
+
+        filtros = []
+
+        # ---------------------------------------------
+        # SUB-REGIÃO
+        # ---------------------------------------------
+        if ids_sub:
+            filtros.append(
+                f"u.cod_subregiao = ANY(${idx}::int[])"
+            )
+            params.append(ids_sub)
+            idx += 1
+
+        # ---------------------------------------------
+        # REGIÃO
+        # ---------------------------------------------
+        if regiao:
+            filtros.append(
+                f"""
+                EXISTS (
+                    SELECT 1
+                    FROM subregioes sr
+                    JOIN regioes rg
+                        ON rg.codigo = sr.codigo_regiao
+                    WHERE sr.codigo = u.cod_subregiao
+                    AND UPPER(TRIM(rg.nome)) =
+                        UPPER(TRIM(${idx}))
+                )
+                """
+            )
+            params.append(regiao)
+            idx += 1
+
+        # ---------------------------------------------
+        # PROGRAMA
+        # Mantém a mesma normalização já utilizada
+        # pela análise preditiva:
+        # 29 -> 11
+        # 30 -> 7
+        # ---------------------------------------------
+        if ids_prog_txt:
+            filtros.append(
+                f"""
+                (
+                    CASE
+                        WHEN h.cod_programa = 29 THEN '11'
+                        WHEN h.cod_programa = 30 THEN '7'
+                        ELSE TRIM(
+                            COALESCE(
+                                h.cod_programa::text,
+                                ''
+                            )
+                        )
+                    END
+                ) = ANY(${idx}::text[])
+                """
+            )
+            params.append(ids_prog_txt)
+            idx += 1
+
+        where_extra = ""
+
+        if filtros:
+            where_extra = (
+                " AND "
+                + " AND ".join(filtros)
+            )
+
+        sql = f"""
+        WITH meses AS (
+            SELECT generate_series(1, 12) AS mes
+        ),
+
+        ha_futura AS (
+            SELECT
+                h.competencia_mes AS mes,
+
+                COALESCE(
+                    SUM(h.ha_total),
+                    0
+                ) AS valor
+
+            FROM vw_ha_previsao_resolvida h
+
+            JOIN uo u
+                ON u.codigo = h.cod_uo
+
+            WHERE h.competencia_ano = $1
+            {where_extra}
+
+            GROUP BY h.competencia_mes
+        )
+
+        SELECT
+            m.mes,
+
+            COALESCE(
+                hf.valor,
+                0
+            ) AS valor
+
+        FROM meses m
+
+        LEFT JOIN ha_futura hf
+            ON hf.mes = m.mes
+
+        ORDER BY m.mes
+        """
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                sql,
+                *params
+            )
+
+        return [
+            round(
+                float(r["valor"] or 0),
+                2
+            )
+            for r in rows
+        ]
 
     async def montar_indicador(indicador: str):
         serie = await buscar_serie(indicador)
@@ -11783,12 +12649,28 @@ async def performance_preditiva(
     matriculas = await montar_indicador("matriculas")
     hora_aluno = await montar_indicador("hora_aluno")
     receita = await montar_indicador("receita")
+
+    ha_garantida = await buscar_ha_garantida()
+
+    hora_aluno["garantida"] = ha_garantida
+
+    # Para Hora-Aluno, a previsão dos meses futuros
+    # passa a utilizar a carga horária garantida
+    # pelos arquivos mensais importados.
+    for i in range(12):
+        if hora_aluno["realizado"][i] is None:
+            hora_aluno["previsao"][i] = ha_garantida[i]
+
     matriculas_modalidade = (
         await montar_matriculas_por_modalidade()
     )
 
     hora_aluno_modalidade = (
         await montar_hora_aluno_por_modalidade()
+    )
+
+    hora_aluno_modalidade_financiamento = (
+        await montar_hora_aluno_modalidade_financiamento()
     )
 
     receita_modalidade = (
@@ -11808,10 +12690,13 @@ async def performance_preditiva(
 
         "matriculas_modalidade":
             matriculas_modalidade,
-        
+
         "hora_aluno_modalidade":
             hora_aluno_modalidade,
-        
+
+        "hora_aluno_modalidade_financiamento":
+            hora_aluno_modalidade_financiamento,
+
         "receita_modalidade":
             receita_modalidade,
     }
@@ -17986,6 +18871,382 @@ async def processar_contratos_pf(request: Request, lote_id: int):
         "erros": erros
     }
 
+@router.post("/importacao/evasao")
+async def importar_evasao(
+    request: Request,
+    arquivo: UploadFile = File(...)
+):
+    pool = request.app.state.pool
+
+    conteudo = await arquivo.read()
+
+    try:
+        df = pd.read_excel(
+            io.BytesIO(conteudo),
+            dtype=str
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Erro ao ler arquivo Excel: {str(e)}"
+        )
+
+    # =========================================================
+    # NORMALIZA COLUNAS
+    # =========================================================
+
+    df.columns = [
+        str(coluna).strip().upper()
+        for coluna in df.columns
+    ]
+
+    colunas_obrigatorias = [
+        "CODFILIAL",
+        "RA",
+        "NOME",
+        "CPF",
+        "CODIGO_CURSO",
+        "CURSO",
+        "MODALIDADE",
+        "DTMATRICULA",
+        "CODTURMA",
+        "ITEM_CONTABIL",
+        "MAIOR_DT_MOV_CURSO_LOG",
+        "DTINICIAL_TURMA",
+        "DTFINAL_TURMA",
+        "STATUS_CURSO",
+        "STATUS_PLETIVO",
+        "SENAI_CONDICAO_ALUNO_CURSO"
+    ]
+
+    faltantes = [
+        coluna
+        for coluna in colunas_obrigatorias
+        if coluna not in df.columns
+    ]
+
+    if faltantes:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Colunas obrigatórias ausentes: "
+                + ", ".join(faltantes)
+            )
+        )
+
+    # =========================================================
+    # CRIA O LOTE
+    # =========================================================
+
+    async with pool.acquire() as conn:
+
+        lote_id = await conn.fetchval(
+            """
+            INSERT INTO importacao_evasao_lotes (
+                nome_arquivo,
+                linhas_importadas,
+                validas,
+                invalidas,
+                status_processamento
+            )
+            VALUES (
+                $1,
+                $2,
+                0,
+                0,
+                'importando'
+            )
+            RETURNING id
+            """,
+            arquivo.filename,
+            len(df)
+        )
+
+        validas = 0
+        invalidas = 0
+
+        # =========================================================
+        # PREPARA AS LINHAS EM MEMÓRIA
+        # =========================================================
+
+        def data_ou_none(valor):
+            if valor is None:
+                return None
+
+            texto = str(valor).strip()
+
+            if (
+                texto == ""
+                or texto.lower() == "nan"
+                or texto.lower() == "nat"
+            ):
+                return None
+
+            try:
+                return pd.to_datetime(
+                    texto,
+                    dayfirst=True,
+                    errors="raise"
+                ).date()
+
+            except Exception:
+                return None
+
+
+        def texto_ou_none(valor):
+            if valor is None:
+                return None
+
+            if pd.isna(valor):
+                return None
+
+            texto = str(valor).strip()
+
+            if texto == "":
+                return None
+
+            return texto
+
+
+        linhas_para_inserir = []
+
+
+        for _, row in df.iterrows():
+
+            status_curso = (
+                str(
+                    row.get(
+                        "STATUS_CURSO",
+                        ""
+                    )
+                )
+                .strip()
+                .upper()
+            )
+
+            tipo_evasao = None
+            flag_valida = True
+            motivo_erro = None
+
+
+            # =====================================================
+            # TIPO DE EVASÃO
+            # =====================================================
+
+            if status_curso == "DESISTENTE":
+
+                tipo_evasao = "DESISTENTE"
+
+            elif status_curso == "EVADIDO":
+
+                tipo_evasao = "EVADIDO"
+
+            else:
+
+                flag_valida = False
+
+                motivo_erro = (
+                    f"STATUS_CURSO não reconhecido: "
+                    f"{status_curso}"
+                )
+
+
+            # =====================================================
+            # DATAS
+            # =====================================================
+
+            data_matricula = data_ou_none(
+                row.get("DTMATRICULA")
+            )
+
+            data_movimento = data_ou_none(
+                row.get(
+                    "MAIOR_DT_MOV_CURSO_LOG"
+                )
+            )
+
+            data_inicio_turma = data_ou_none(
+                row.get("DTINICIAL_TURMA")
+            )
+
+            data_fim_turma = data_ou_none(
+                row.get("DTFINAL_TURMA")
+            )
+
+
+            # =====================================================
+            # VALIDAÇÃO
+            # =====================================================
+
+            if not data_movimento:
+
+                flag_valida = False
+
+                if motivo_erro:
+
+                    motivo_erro += (
+                        "; Data de movimento ausente"
+                    )
+
+                else:
+
+                    motivo_erro = (
+                        "Data de movimento ausente"
+                    )
+
+
+            if flag_valida:
+
+                validas += 1
+
+            else:
+
+                invalidas += 1
+
+
+            # =====================================================
+            # MONTA TUPLA PARA INSERÇÃO EM LOTE
+            # =====================================================
+
+            linhas_para_inserir.append(
+                (
+                    lote_id,
+
+                    texto_ou_none(
+                        row.get("CODFILIAL")
+                    ),
+
+                    texto_ou_none(
+                        row.get("RA")
+                    ),
+
+                    texto_ou_none(
+                        row.get("NOME")
+                    ),
+
+                    texto_ou_none(
+                        row.get("CPF")
+                    ),
+
+                    texto_ou_none(
+                        row.get("CODIGO_CURSO")
+                    ),
+
+                    texto_ou_none(
+                        row.get("CURSO")
+                    ),
+
+                    texto_ou_none(
+                        row.get("MODALIDADE")
+                    ),
+
+                    data_matricula,
+
+                    texto_ou_none(
+                        row.get("CODTURMA")
+                    ),
+
+                    texto_ou_none(
+                        row.get("ITEM_CONTABIL")
+                    ),
+
+                    data_movimento,
+
+                    data_inicio_turma,
+
+                    data_fim_turma,
+
+                    texto_ou_none(
+                        row.get("STATUS_CURSO")
+                    ),
+
+                    texto_ou_none(
+                        row.get("STATUS_PLETIVO")
+                    ),
+
+                    texto_ou_none(
+                        row.get(
+                            "SENAI_CONDICAO_ALUNO_CURSO"
+                        )
+                    ),
+
+                    tipo_evasao,
+
+                    flag_valida,
+
+                    motivo_erro
+                )
+            )
+
+
+        # =========================================================
+        # INSERE TODAS AS LINHAS EM LOTE
+        # =========================================================
+
+        if linhas_para_inserir:
+
+            await conn.executemany(
+                """
+                INSERT INTO importacao_evasao_linhas (
+                    lote_id,
+                    cod_filial,
+                    ra,
+                    nome,
+                    cpf,
+                    codigo_curso,
+                    curso,
+                    modalidade,
+                    data_matricula,
+                    cod_turma,
+                    item_contabil,
+                    data_movimento,
+                    data_inicio_turma,
+                    data_fim_turma,
+                    status_curso,
+                    status_pletivo,
+                    condicao_aluno,
+                    tipo_evasao,
+                    flag_valida,
+                    motivo_erro
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5,
+                    $6, $7, $8, $9, $10,
+                    $11, $12, $13, $14, $15,
+                    $16, $17, $18, $19, $20
+                )
+                """,
+                linhas_para_inserir
+            )
+
+        # =====================================================
+        # FINALIZA LOTE
+        # =====================================================
+
+        await conn.execute(
+            """
+            UPDATE importacao_evasao_lotes
+            SET
+                validas = $2,
+                invalidas = $3,
+                status_processamento = 'processado',
+                data_processamento = CURRENT_TIMESTAMP
+            WHERE id = $1
+            """,
+            lote_id,
+            validas,
+            invalidas
+        )
+
+    return {
+        "lote_id": lote_id,
+        "arquivo": arquivo.filename,
+        "linhas_importadas": len(df),
+        "validas": validas,
+        "invalidas": invalidas,
+        "status": "processado"
+    }
+
 @router.post("/importacoes/cotas")
 async def importar_cotas(request: Request, arquivo: UploadFile = File(...)):
     if not arquivo.filename:
@@ -23130,137 +24391,162 @@ async def modalidades_evasao_receita(request: Request, ano: int):
 async def performance_evasao(request: Request, ano: int, modalidade: int):
     pool = request.app.state.pool
 
-    sql = """
-    WITH RECURSIVE base AS (
-        SELECT
-            t.codigo_sge,
-            t.cod_modalidade,
-            COALESCE(l.modulo_atual, 0)::int AS modulo_atual,
-            COALESCE(l.qtd_periodos, 0)::int AS qtd_periodos,
-            l.dtinicial::date AS dtinicial,
-            l.dtfinal::date AS dtfinal,
-            COALESCE(l.valor_liquido, 0)::numeric AS valor_liquido,
-            NULLIF(COALESCE(l.qtd_parcelas, 0), 0)::numeric AS qtd_parcelas,
-            COALESCE(tsr.matriculados, 0)
-            + COALESCE(tsr.cancelados, 0)
-            + COALESCE(tsr.desistentes, 0)
-            + COALESCE(tsr.evadidos, 0)
-            + COALESCE(tsr.falecidos, 0) AS qtd_alunos,
-            COALESCE(tsr.desistentes, 0)
-            + COALESCE(tsr.evadidos, 0)
-            + COALESCE(tsr.falecidos, 0) AS qtd_evadidos
-        FROM importacao_contratos_pf_linhas l
-        JOIN turmas t
-        ON TRIM(UPPER(t.codigo_sge)) = TRIM(UPPER(l.codturma))
-        LEFT JOIN turmas_status_resumo tsr
-        ON tsr.cod_turma = t.codigo
-        WHERE l.status IN ('RESOLVIDO', 'FORA_ESCOPO')
-        AND t.cod_modalidade = $2
-        AND COALESCE(l.valor_liquido, 0) > 0
-        AND COALESCE(l.qtd_parcelas, 0) > 0
-        AND NOT (
-            t.cod_modalidade = 15
-            AND COALESCE(l.modulo_atual, 0)::int <> 1
-        )
-    ),
-    periodos AS (
-        SELECT
-            b.*,
-            1 AS modulo_virtual,
-            b.dtinicial AS inicio_periodo,
-            CASE
-                WHEN b.cod_modalidade = 15 THEN (
-                    b.dtinicial
-                    + INTERVAL '6 months'
-                    + CASE
-                        WHEN EXTRACT(MONTH FROM b.dtinicial)::int BETWEEN 7 AND 12
-                        THEN INTERVAL '1 month'
-                        ELSE INTERVAL '0 month'
-                    END
-                )::date
-                ELSE b.dtfinal
-            END AS fim_periodo
-        FROM base b
+    # =========================================================
+    # DEMAIS MODALIDADES
+    #
+    # Reutiliza os cálculos já validados na rota
+    # /performance/evasao/tabela.
+    # =========================================================
 
-        UNION ALL
-
-        SELECT
-            p.codigo_sge,
-            p.cod_modalidade,
-            p.modulo_atual,
-            p.qtd_periodos,
-            p.dtinicial,
-            p.dtfinal,
-            p.valor_liquido,
-            p.qtd_parcelas,
-            p.qtd_alunos,
-            p.qtd_evadidos,
-            p.modulo_virtual + 1,
-            (p.fim_periodo + INTERVAL '1 day')::date AS inicio_periodo,
-            (
-                (p.fim_periodo + INTERVAL '1 day')::date
-                + INTERVAL '6 months'
-                + CASE
-                    WHEN EXTRACT(MONTH FROM (p.fim_periodo + INTERVAL '1 day')::date)::int BETWEEN 7 AND 12
-                    THEN INTERVAL '1 month'
-                    ELSE INTERVAL '0 month'
-                END
-            )::date AS fim_periodo
-        FROM periodos p
-        WHERE p.cod_modalidade = 15
-        AND p.modulo_virtual < COALESCE(p.qtd_periodos, 0)::int
-    ),
-    meses AS (
-        SELECT generate_series(1, 12) AS mes
+    dados_tabela = await performance_evasao_tabela(
+        request=request,
+        ano=ano,
+        modalidade=modalidade
     )
+
+    # A consulta filtrada deve retornar somente
+    # a modalidade solicitada.
+    if not dados_tabela:
+        return {
+            "meses": [
+                "Jan",
+                "Fev",
+                "Mar",
+                "Abr",
+                "Mai",
+                "Jun",
+                "Jul",
+                "Ago",
+                "Set",
+                "Out",
+                "Nov",
+                "Dez",
+            ],
+            "realizado": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            "previsao": [
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ],
+        }
+
+    linha = dados_tabela[0]
+
+    meses = [
+        "Jan",
+        "Fev",
+        "Mar",
+        "Abr",
+        "Mai",
+        "Jun",
+        "Jul",
+        "Ago",
+        "Set",
+        "Out",
+        "Nov",
+        "Dez",
+    ]
+
+    campos = [
+        "jan",
+        "fev",
+        "mar",
+        "abr",
+        "mai",
+        "jun",
+        "jul",
+        "ago",
+        "set",
+        "out",
+        "nov",
+        "dez",
+    ]
+
+    # =========================================================
+    # ÚLTIMO MÊS COM EVASÃO REAL NO ÚLTIMO LOTE PROCESSADO
+    # =========================================================
+
+    sql_ultimo_mes_evasao = """
+    WITH ultimo_lote AS (
+        SELECT MAX(id) AS lote_id
+        FROM importacao_evasao_lotes
+        WHERE status_processamento = 'processado'
+    )
+
     SELECT
-        meses.mes,
-        COALESCE(SUM(
-            CASE
-                WHEN b.qtd_evadidos > 0
-                 AND make_date($1, meses.mes, 1)
-                     BETWEEN date_trunc('month', b.inicio_periodo)::date
-                     AND date_trunc('month', b.fim_periodo)::date    
-                THEN (b.valor_liquido / NULLIF(b.qtd_alunos, 0)) * b.qtd_evadidos
-                ELSE 0
-            END
-        ), 0) AS receita_perdida
-    FROM meses
-    LEFT JOIN periodos b ON TRUE
-    GROUP BY meses.mes
-    ORDER BY meses.mes
+        COALESCE(
+            MAX(
+                EXTRACT(
+                    MONTH FROM e.data_movimento
+                )::int
+            ),
+            0
+        )
+
+    FROM importacao_evasao_linhas e
+
+    CROSS JOIN ultimo_lote ul
+
+    WHERE e.lote_id = ul.lote_id
+      AND e.flag_valida = TRUE
+      AND EXTRACT(
+            YEAR FROM e.data_movimento
+          )::int = $1
     """
 
     async with pool.acquire() as conn:
-        rows = await conn.fetch(sql, ano, modalidade)
+        ultimo_mes_realizado = await conn.fetchval(
+            sql_ultimo_mes_evasao,
+            ano
+        )
 
-    nomes_meses = {
-        1: "Jan", 2: "Fev", 3: "Mar", 4: "Abr",
-        5: "Mai", 6: "Jun", 7: "Jul", 8: "Ago",
-        9: "Set", 10: "Out", 11: "Nov", 12: "Dez",
-    }
-
-    # Define até qual mês será considerado realizado.
-    # Ajuste aqui conforme o fechamento real da receita.
-    # Exemplo: se a última receita realizada carregada é maio, use 5.
-    ultimo_mes_realizado = 5
+    ultimo_mes_realizado = int(
+        ultimo_mes_realizado or 0
+    )
 
     realizado = []
     previsao = []
 
-    for r in rows:
-        mes = int(r["mes"])
-        valor = float(r["receita_perdida"] or 0)
+    for numero_mes, campo in enumerate(
+        campos,
+        start=1
+    ):
+        valor = float(
+            linha.get(campo, 0) or 0
+        )
 
-        if mes <= ultimo_mes_realizado:
+        if numero_mes <= ultimo_mes_realizado:
             realizado.append(valor)
             previsao.append(None)
+
         else:
             realizado.append(None)
             previsao.append(valor)
 
     return {
-        "meses": [nomes_meses[int(r["mes"])] for r in rows],
+        "meses": meses,
         "realizado": realizado,
         "previsao": previsao,
     }
@@ -23269,46 +24555,989 @@ async def performance_evasao(request: Request, ano: int, modalidade: int):
 async def performance_evasao_tabela(
     request: Request,
     ano: int,
-    modalidade: int | None = None
+    modalidade: int | None = None,
+    mes_inicio: int = 1,
+    mes_fim: int = 12
 ):
     pool = request.app.state.pool
 
+    # =========================================================
+    # HABILITAÇÃO PROFISSIONAL TÉCNICA
+    # Nova lógica baseada em evasões reais
+    # =========================================================
+
+    if modalidade == 15:
+
+        sql_tecnico = """
+        WITH RECURSIVE ultimo_lote_evasao AS (
+            SELECT MAX(id) AS lote_id
+            FROM importacao_evasao_lotes
+            WHERE status_processamento = 'processado'
+        ),
+
+        evasoes AS (
+            SELECT
+                e.id,
+                UPPER(TRIM(e.cod_turma)) AS cod_turma,
+                e.tipo_evasao,
+                e.data_movimento::date AS data_movimento
+
+            FROM importacao_evasao_linhas e
+            CROSS JOIN ultimo_lote_evasao ul
+
+            WHERE e.lote_id = ul.lote_id
+              AND e.flag_valida = TRUE
+
+              AND EXTRACT(
+                    YEAR FROM e.data_movimento
+                  )::int = $1
+
+              AND UPPER(TRIM(e.modalidade)) =
+                  UPPER('Habilitação Técnica de Nível Médio')
+
+              AND UPPER(
+                    TRIM(
+                        COALESCE(
+                            e.condicao_aluno,
+                            ''
+                        )
+                    )
+                  ) =
+                  UPPER(
+                      'Pago por Pessoa Fisica ou Empresa'
+                  )
+        ),
+
+        contratos_atuais AS (
+            SELECT DISTINCT ON (
+                UPPER(TRIM(c.codturma))
+            )
+                UPPER(TRIM(c.codturma))
+                    AS cod_turma,
+
+                SPLIT_PART(
+                    UPPER(TRIM(c.codturma)),
+                    '.',
+                    1
+                ) AS familia_curso,
+
+                COALESCE(
+                    c.modulo_atual,
+                    0
+                )::int AS modulo_atual,
+
+                COALESCE(
+                    c.qtd_periodos,
+                    0
+                )::int AS qtd_periodos,
+
+                c.dtinicial::date AS dtinicial,
+                c.dtfinal::date AS dtfinal,
+
+                COALESCE(
+                    c.qtd_contratos,
+                    0
+                )::numeric AS qtd_contratos,
+
+                COALESCE(
+                    c.valor_liquido,
+                    0
+                )::numeric AS valor_liquido,
+
+                c.lote_id,
+                c.id
+
+            FROM importacao_contratos_pf_linhas c
+
+            WHERE c.codturma IS NOT NULL
+              AND c.dtinicial IS NOT NULL
+              AND c.dtfinal IS NOT NULL
+
+              AND COALESCE(
+                    c.qtd_contratos,
+                    0
+                  ) > 0
+
+              AND COALESCE(
+                    c.valor_liquido,
+                    0
+                  ) > 0
+
+            ORDER BY
+                UPPER(TRIM(c.codturma)),
+                c.lote_id DESC,
+                c.id DESC
+        ),
+
+        contratos_tecnicos AS (
+            SELECT
+                c.*,
+
+                (
+                    c.valor_liquido
+                    /
+                    NULLIF(
+                        c.qtd_contratos,
+                        0
+                    )
+                ) AS valor_por_aluno,
+
+                (
+                    c.dtfinal
+                    - c.dtinicial
+                    + 1
+                )::int AS duracao_dias
+
+            FROM contratos_atuais c
+
+            JOIN turmas t
+              ON UPPER(TRIM(t.codigo_sge)) =
+                 c.cod_turma
+
+            WHERE t.cod_modalidade = 15
+
+              AND c.qtd_periodos IN (
+                  3,
+                  4,
+                  5,
+                  6
+              )
+
+              AND c.modulo_atual
+                  BETWEEN 1
+                      AND c.qtd_periodos
+
+              AND c.dtfinal >= c.dtinicial
+        ),
+
+        referencias_modulos AS (
+            SELECT
+                qtd_periodos,
+                modulo_atual,
+
+                PERCENTILE_CONT(0.5)
+                WITHIN GROUP (
+                    ORDER BY valor_por_aluno
+                )::numeric AS valor_referencia,
+
+                ROUND(
+                    PERCENTILE_CONT(0.5)
+                    WITHIN GROUP (
+                        ORDER BY duracao_dias
+                    )
+                )::int AS duracao_referencia
+
+            FROM contratos_tecnicos
+
+            GROUP BY
+                qtd_periodos,
+                modulo_atual
+        ),
+
+        pares_possiveis AS (
+            SELECT
+                atual.cod_turma
+                    AS turma_atual,
+
+                atual.qtd_periodos,
+                atual.modulo_atual,
+
+                futuro.modulo_atual
+                    AS modulo_seguinte,
+
+                (
+                    futuro.dtinicial
+                    - atual.dtfinal
+                )::int AS intervalo_dias,
+
+                ROW_NUMBER() OVER (
+                    PARTITION BY
+                        atual.cod_turma,
+                        futuro.modulo_atual
+
+                    ORDER BY
+                        ABS(
+                            futuro.dtinicial
+                            - atual.dtfinal
+                        ),
+                        futuro.dtinicial
+                ) AS rn
+
+            FROM contratos_tecnicos atual
+
+            JOIN contratos_tecnicos futuro
+              ON futuro.familia_curso =
+                 atual.familia_curso
+
+             AND futuro.qtd_periodos =
+                 atual.qtd_periodos
+
+             AND futuro.modulo_atual =
+                 atual.modulo_atual + 1
+
+            WHERE futuro.dtinicial
+                  BETWEEN
+                      atual.dtfinal
+                      - INTERVAL '90 days'
+
+                      AND
+
+                      atual.dtfinal
+                      + INTERVAL '365 days'
+        ),
+
+        intervalos AS (
+            SELECT
+                qtd_periodos,
+                modulo_atual,
+                modulo_seguinte,
+
+                ROUND(
+                    PERCENTILE_CONT(0.5)
+                    WITHIN GROUP (
+                        ORDER BY intervalo_dias
+                    )
+                )::int AS intervalo_referencia
+
+            FROM pares_possiveis
+
+            WHERE rn = 1
+
+            GROUP BY
+                qtd_periodos,
+                modulo_atual,
+                modulo_seguinte
+        ),
+
+        base AS (
+            SELECT
+                e.id,
+                e.cod_turma,
+                e.tipo_evasao,
+                e.data_movimento,
+
+                c.qtd_periodos,
+                c.modulo_atual,
+
+                c.dtinicial,
+                c.dtfinal,
+
+                c.valor_por_aluno,
+                c.duracao_dias,
+
+                CASE
+                    WHEN e.data_movimento < c.dtinicial
+                    THEN 'ANTES DO INÍCIO'
+
+                    WHEN e.data_movimento < c.dtfinal
+                    THEN 'DURANTE'
+
+                    ELSE 'APÓS O FIM'
+                END AS posicao_evasao
+
+            FROM evasoes e
+
+            JOIN contratos_tecnicos c
+              ON c.cod_turma =
+                 e.cod_turma
+        ),
+
+        periodo_atual AS (
+            SELECT
+                b.id,
+
+                gs.dia::date AS dia,
+
+                (
+                    b.valor_por_aluno
+                    /
+                    NULLIF(
+                        b.duracao_dias,
+                        0
+                    )
+                ) AS perda_dia
+
+            FROM base b
+
+            CROSS JOIN LATERAL generate_series(
+
+                CASE
+                    WHEN b.posicao_evasao =
+                         'ANTES DO INÍCIO'
+                    THEN
+                        b.dtinicial::timestamp
+
+                    ELSE
+                        (
+                            b.data_movimento
+                            + INTERVAL '1 day'
+                        )::timestamp
+                END,
+
+                b.dtfinal::timestamp,
+
+                INTERVAL '1 day'
+
+            ) AS gs(dia)
+
+            WHERE
+                (
+                    b.posicao_evasao =
+                    'ANTES DO INÍCIO'
+
+                    OR
+
+                    (
+                        b.posicao_evasao =
+                        'DURANTE'
+
+                        AND b.tipo_evasao =
+                            'DESISTENTE'
+                    )
+                )
+        ),
+
+        calendario_futuro AS (
+
+            SELECT
+                b.id,
+                b.qtd_periodos,
+
+                b.modulo_atual + 1
+                    AS modulo,
+
+                (
+                    b.dtfinal
+                    +
+                    i.intervalo_referencia
+                    + 1
+                )::date AS inicio_modulo,
+
+                (
+                    b.dtfinal
+                    +
+                    i.intervalo_referencia
+                    +
+                    r.duracao_referencia
+                )::date AS fim_modulo,
+
+                r.valor_referencia,
+                r.duracao_referencia
+
+            FROM base b
+
+            JOIN referencias_modulos r
+              ON r.qtd_periodos =
+                 b.qtd_periodos
+
+             AND r.modulo_atual =
+                 b.modulo_atual + 1
+
+            JOIN intervalos i
+              ON i.qtd_periodos =
+                 b.qtd_periodos
+
+             AND i.modulo_atual =
+                 b.modulo_atual
+
+             AND i.modulo_seguinte =
+                 b.modulo_atual + 1
+
+            WHERE b.posicao_evasao IN (
+                'ANTES DO INÍCIO',
+                'DURANTE'
+            )
+
+              AND b.modulo_atual <
+                  b.qtd_periodos
+
+
+            UNION ALL
+
+
+            SELECT
+                cf.id,
+                cf.qtd_periodos,
+
+                cf.modulo + 1
+                    AS modulo,
+
+                (
+                    cf.fim_modulo
+                    +
+                    i.intervalo_referencia
+                    + 1
+                )::date AS inicio_modulo,
+
+                (
+                    cf.fim_modulo
+                    +
+                    i.intervalo_referencia
+                    +
+                    r.duracao_referencia
+                )::date AS fim_modulo,
+
+                r.valor_referencia,
+                r.duracao_referencia
+
+            FROM calendario_futuro cf
+
+            JOIN referencias_modulos r
+              ON r.qtd_periodos =
+                 cf.qtd_periodos
+
+             AND r.modulo_atual =
+                 cf.modulo + 1
+
+            JOIN intervalos i
+              ON i.qtd_periodos =
+                 cf.qtd_periodos
+
+             AND i.modulo_atual =
+                 cf.modulo
+
+             AND i.modulo_seguinte =
+                 cf.modulo + 1
+
+            WHERE cf.modulo <
+                  cf.qtd_periodos
+        ),
+
+        periodos_futuros AS (
+            SELECT
+                cf.id,
+
+                gs.dia::date AS dia,
+
+                (
+                    cf.valor_referencia
+                    /
+                    NULLIF(
+                        cf.duracao_referencia,
+                        0
+                    )
+                ) AS perda_dia
+
+            FROM calendario_futuro cf
+
+            CROSS JOIN LATERAL generate_series(
+                cf.inicio_modulo::timestamp,
+                cf.fim_modulo::timestamp,
+                INTERVAL '1 day'
+            ) AS gs(dia)
+        ),
+
+        perdas_diarias AS (
+            SELECT
+                id,
+                dia,
+                perda_dia
+
+            FROM periodo_atual
+
+            UNION ALL
+
+            SELECT
+                id,
+                dia,
+                perda_dia
+
+            FROM periodos_futuros
+        ),
+
+        perdas_ano AS (
+            SELECT
+                id,
+                dia,
+                perda_dia,
+
+                EXTRACT(
+                    MONTH FROM dia
+                )::int AS mes
+
+            FROM perdas_diarias
+
+            WHERE dia >=
+                  make_date(
+                      $1,
+                      1,
+                      1
+                  )
+
+              AND dia <=
+                  make_date(
+                      $1,
+                      12,
+                      31
+                  )
+        ),
+
+        mensal AS (
+            SELECT
+                mes,
+
+                COUNT(
+                    DISTINCT id
+                ) AS evadidos,
+
+                SUM(
+                    perda_dia
+                ) AS perda
+
+            FROM perdas_ano
+
+            GROUP BY mes
+        ),
+
+        total_evasoes AS (
+            SELECT
+                COUNT(
+                    DISTINCT id
+                ) AS ev_total
+
+            FROM perdas_diarias
+        ),
+
+        evasoes_periodo AS (
+            SELECT
+                COUNT(
+                    DISTINCT id
+                ) AS ev_periodo
+
+            FROM perdas_ano
+
+            WHERE mes BETWEEN $2 AND $3
+        )
+
+        SELECT
+            15 AS cod_modalidade,
+
+            'HABILITAÇÃO PROFISSIONAL TÉCNICA'
+                AS modalidade_nome,
+
+            COALESCE(
+                MAX(evadidos)
+                FILTER (WHERE mes = 1),
+                0
+            ) AS ev_jan,
+
+            COALESCE(
+                MAX(evadidos)
+                FILTER (WHERE mes = 2),
+                0
+            ) AS ev_fev,
+
+            COALESCE(
+                MAX(evadidos)
+                FILTER (WHERE mes = 3),
+                0
+            ) AS ev_mar,
+
+            COALESCE(
+                MAX(evadidos)
+                FILTER (WHERE mes = 4),
+                0
+            ) AS ev_abr,
+
+            COALESCE(
+                MAX(evadidos)
+                FILTER (WHERE mes = 5),
+                0
+            ) AS ev_mai,
+
+            COALESCE(
+                MAX(evadidos)
+                FILTER (WHERE mes = 6),
+                0
+            ) AS ev_jun,
+
+            COALESCE(
+                MAX(evadidos)
+                FILTER (WHERE mes = 7),
+                0
+            ) AS ev_jul,
+
+            COALESCE(
+                MAX(evadidos)
+                FILTER (WHERE mes = 8),
+                0
+            ) AS ev_ago,
+
+            COALESCE(
+                MAX(evadidos)
+                FILTER (WHERE mes = 9),
+                0
+            ) AS ev_set,
+
+            COALESCE(
+                MAX(evadidos)
+                FILTER (WHERE mes = 10),
+                0
+            ) AS ev_out,
+
+            COALESCE(
+                MAX(evadidos)
+                FILTER (WHERE mes = 11),
+                0
+            ) AS ev_nov,
+
+            COALESCE(
+                MAX(evadidos)
+                FILTER (WHERE mes = 12),
+                0
+            ) AS ev_dez,
+
+            COALESCE(
+                (
+                    SELECT ev_total
+                    FROM total_evasoes
+                ),
+                0
+            ) AS ev_total,
+
+            COALESCE(
+                (
+                    SELECT ev_periodo
+                    FROM evasoes_periodo
+                ),
+                0
+            ) AS ev_periodo,
+
+            COALESCE(
+                SUM(perda)
+                FILTER (WHERE mes = 1),
+                0
+            ) AS jan,
+
+            COALESCE(
+                SUM(perda)
+                FILTER (WHERE mes = 2),
+                0
+            ) AS fev,
+
+            COALESCE(
+                SUM(perda)
+                FILTER (WHERE mes = 3),
+                0
+            ) AS mar,
+
+            COALESCE(
+                SUM(perda)
+                FILTER (WHERE mes = 4),
+                0
+            ) AS abr,
+
+            COALESCE(
+                SUM(perda)
+                FILTER (WHERE mes = 5),
+                0
+            ) AS mai,
+
+            COALESCE(
+                SUM(perda)
+                FILTER (WHERE mes = 6),
+                0
+            ) AS jun,
+
+            COALESCE(
+                SUM(perda)
+                FILTER (WHERE mes = 7),
+                0
+            ) AS jul,
+
+            COALESCE(
+                SUM(perda)
+                FILTER (WHERE mes = 8),
+                0
+            ) AS ago,
+
+            COALESCE(
+                SUM(perda)
+                FILTER (WHERE mes = 9),
+                0
+            ) AS "set",
+
+            COALESCE(
+                SUM(perda)
+                FILTER (WHERE mes = 10),
+                0
+            ) AS "out",
+
+            COALESCE(
+                SUM(perda)
+                FILTER (WHERE mes = 11),
+                0
+            ) AS nov,
+
+            COALESCE(
+                SUM(perda)
+                FILTER (WHERE mes = 12),
+                0
+            ) AS dez,
+
+            COALESCE(
+                SUM(perda),
+                0
+            ) AS total
+
+        FROM mensal
+        """
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                sql_tecnico,
+                ano,
+                mes_inicio,
+                mes_fim
+            )
+
+        return [
+            {
+                "cod_modalidade":
+                    r["cod_modalidade"],
+
+                "modalidade":
+                    r["modalidade_nome"],
+
+                "evadidos":
+                    int(r["ev_total"] or 0),
+
+                "ev_jan":
+                    int(r["ev_jan"] or 0),
+
+                "ev_fev":
+                    int(r["ev_fev"] or 0),
+
+                "ev_mar":
+                    int(r["ev_mar"] or 0),
+
+                "ev_abr":
+                    int(r["ev_abr"] or 0),
+
+                "ev_mai":
+                    int(r["ev_mai"] or 0),
+
+                "ev_jun":
+                    int(r["ev_jun"] or 0),
+
+                "ev_jul":
+                    int(r["ev_jul"] or 0),
+
+                "ev_ago":
+                    int(r["ev_ago"] or 0),
+
+                "ev_set":
+                    int(r["ev_set"] or 0),
+
+                "ev_out":
+                    int(r["ev_out"] or 0),
+
+                "ev_nov":
+                    int(r["ev_nov"] or 0),
+
+                "ev_dez":
+                    int(r["ev_dez"] or 0),
+
+                "ev_total":
+                    int(r["ev_total"] or 0),
+                
+                "ev_periodo":
+                    int(r["ev_periodo"] or 0),
+
+                "jan":
+                    float(r["jan"] or 0),
+
+                "fev":
+                    float(r["fev"] or 0),
+
+                "mar":
+                    float(r["mar"] or 0),
+
+                "abr":
+                    float(r["abr"] or 0),
+
+                "mai":
+                    float(r["mai"] or 0),
+
+                "jun":
+                    float(r["jun"] or 0),
+
+                "jul":
+                    float(r["jul"] or 0),
+
+                "ago":
+                    float(r["ago"] or 0),
+
+                "set":
+                    float(r["set"] or 0),
+
+                "out":
+                    float(r["out"] or 0),
+
+                "nov":
+                    float(r["nov"] or 0),
+
+                "dez":
+                    float(r["dez"] or 0),
+
+                "total":
+                    float(r["total"] or 0),
+            }
+            for r in rows
+        ]
+
     sql = """
-    WITH RECURSIVE base AS (
+    WITH RECURSIVE status_alunos AS (
+        SELECT
+            UPPER(
+                TRIM(
+                    COALESCE(cod_turma, '')
+                )
+            ) AS codigo_sge,
+
+            COUNT(*) FILTER (
+                WHERE UPPER(
+                    TRIM(
+                        COALESCE(status_matricula, '')
+                    )
+                ) IN (
+                    'MATRICULADO',
+                    'PRÉ-MATRICULADO',
+                    'CANCELADO',
+                    'DESISTENTE',
+                    'EVADIDO',
+                    'FALECIDO',
+                    'TRANSFERÊNCIA DE CURSO',
+                    'TRANSFERÊNCIA DE ESCOLA',
+                    'TRANSFERÊNCIA DE TURMA',
+                    'APROVADO',
+                    'REPROVADO'
+                )
+            ) AS qtd_alunos,
+
+            COUNT(*) FILTER (
+                WHERE UPPER(
+                    TRIM(
+                        COALESCE(status_matricula, '')
+                    )
+                ) IN (
+                    'DESISTENTE',
+                    'EVADIDO',
+                    'FALECIDO',
+                    'TRANSFERÊNCIA DE CURSO',
+                    'TRANSFERÊNCIA DE ESCOLA'
+                )
+            ) AS qtd_evadidos
+
+        FROM sge_turma_detalhe_alunos
+
+        GROUP BY
+            UPPER(
+                TRIM(
+                    COALESCE(cod_turma, '')
+                )
+            )
+    ),
+
+    base AS (
         SELECT
             t.codigo AS turma_id,
             t.codigo_sge,
             t.cod_modalidade,
-            COALESCE(m.nome, 'Sem modalidade') AS modalidade_nome,
-            COALESCE(l.modulo_atual, 0)::int AS modulo_atual,
-            COALESCE(l.qtd_periodos, 0)::int AS qtd_periodos,
+
+            COALESCE(
+                m.nome,
+                'Sem modalidade'
+            ) AS modalidade_nome,
+
+            COALESCE(
+                l.modulo_atual,
+                0
+            )::int AS modulo_atual,
+
+            COALESCE(
+                l.qtd_periodos,
+                0
+            )::int AS qtd_periodos,
+
             l.dtinicial::date AS dtinicial,
             l.dtfinal::date AS dtfinal,
-            COALESCE(l.valor_liquido, 0)::numeric AS valor_liquido,
-            NULLIF(COALESCE(l.qtd_parcelas, 0), 0)::numeric AS qtd_parcelas,
-            COALESCE(tsr.matriculados, 0)
-            + COALESCE(tsr.cancelados, 0)
-            + COALESCE(tsr.desistentes, 0)
-            + COALESCE(tsr.evadidos, 0)
-            + COALESCE(tsr.falecidos, 0) AS qtd_alunos,
-            COALESCE(tsr.desistentes, 0)
-            + COALESCE(tsr.evadidos, 0)
-            + COALESCE(tsr.falecidos, 0) AS qtd_evadidos
+
+            COALESCE(
+                l.valor_liquido,
+                0
+            )::numeric AS valor_liquido,
+
+            NULLIF(
+                COALESCE(
+                    l.qtd_parcelas,
+                    0
+                ),
+                0
+            )::numeric AS qtd_parcelas,
+
+            COALESCE(
+                sa.qtd_alunos,
+                0
+            ) AS qtd_alunos,
+
+            COALESCE(
+                sa.qtd_evadidos,
+                0
+            ) AS qtd_evadidos
+
         FROM importacao_contratos_pf_linhas l
+
         JOIN turmas t
-        ON TRIM(UPPER(t.codigo_sge)) = TRIM(UPPER(l.codturma))
+            ON TRIM(
+                UPPER(t.codigo_sge)
+            ) =
+            TRIM(
+                UPPER(l.codturma)
+            )
+
         LEFT JOIN modalidade m
-        ON m.codigo = t.cod_modalidade
-        LEFT JOIN turmas_status_resumo tsr
-        ON tsr.cod_turma = t.codigo
-        WHERE l.status IN ('RESOLVIDO', 'FORA_ESCOPO')
+            ON m.codigo = t.cod_modalidade
+
+        LEFT JOIN status_alunos sa
+            ON sa.codigo_sge =
+            UPPER(
+                TRIM(
+                    COALESCE(
+                        t.codigo_sge,
+                        ''
+                    )
+                )
+            )
+
+        WHERE l.status IN (
+            'RESOLVIDO',
+            'FORA_ESCOPO'
+        )
+
         AND t.cod_modalidade IS NOT NULL
-        AND ($2::int IS NULL OR t.cod_modalidade = $2::int)
-        AND COALESCE(l.valor_liquido, 0) > 0
-        AND COALESCE(l.qtd_parcelas, 0) > 0
+
+        AND (
+            $2::int IS NULL
+            OR t.cod_modalidade = $2::int
+        )
+
+        AND COALESCE(
+            l.valor_liquido,
+            0
+        ) > 0
+
+        AND COALESCE(
+            l.qtd_parcelas,
+            0
+        ) > 0
+
         AND NOT (
             t.cod_modalidade = 15
-            AND COALESCE(l.modulo_atual, 0)::int <> 1
+            AND COALESCE(
+                l.modulo_atual,
+                0
+            )::int <> 1
         )
     ),
     periodos AS (
@@ -23374,7 +25603,11 @@ async def performance_evasao_tabela(
                     AND make_date($1, meses.mes, 1)
                         BETWEEN date_trunc('month', b.inicio_periodo)::date
                         AND date_trunc('month', b.fim_periodo)::date
-                    THEN (b.valor_liquido / NULLIF(b.qtd_alunos, 0)) * b.qtd_evadidos
+                    THEN (
+                        b.valor_liquido
+                        / NULLIF(b.qtd_alunos, 0)
+                        / NULLIF(b.qtd_parcelas, 0)
+                    ) * b.qtd_evadidos
                     ELSE 0
                 END
             ), 0) AS receita_perdida
@@ -23472,40 +25705,2512 @@ async def performance_evasao_tabela(
     ORDER BY modalidade_nome
     """
 
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(sql, ano, modalidade)
+    # =========================================================
+    # QUANTIDADES REAIS DE EVASÃO
+    #
+    # Fonte:
+    # importacao_evasao_linhas
+    #
+    # DESISTENTE + EVADIDO
+    # distribuídos pela data real do movimento.
+    # =========================================================
 
-    return [
-        {
-            "cod_modalidade": r["cod_modalidade"],
-            "modalidade": r["modalidade_nome"],
-            "evadidos": int(r["ev_total"] or 0),
-            "ev_jan": int(r["ev_jan"] or 0),
-            "ev_fev": int(r["ev_fev"] or 0),
-            "ev_mar": int(r["ev_mar"] or 0),
-            "ev_abr": int(r["ev_abr"] or 0),
-            "ev_mai": int(r["ev_mai"] or 0),
-            "ev_jun": int(r["ev_jun"] or 0),
-            "ev_jul": int(r["ev_jul"] or 0),
-            "ev_ago": int(r["ev_ago"] or 0),
-            "ev_set": int(r["ev_set"] or 0),
-            "ev_out": int(r["ev_out"] or 0),
-            "ev_nov": int(r["ev_nov"] or 0),
-            "ev_dez": int(r["ev_dez"] or 0),
-            "ev_total": int(r["ev_total"] or 0),
-            "jan": float(r["jan"] or 0),
-            "fev": float(r["fev"] or 0),
-            "mar": float(r["mar"] or 0),
-            "abr": float(r["abr"] or 0),
-            "mai": float(r["mai"] or 0),
-            "jun": float(r["jun"] or 0),
-            "jul": float(r["jul"] or 0),
-            "ago": float(r["ago"] or 0),
-            "set": float(r["set"] or 0),
-            "out": float(r["out"] or 0),
-            "nov": float(r["nov"] or 0),
-            "dez": float(r["dez"] or 0),
-            "total": float(r["total"] or 0),
-        }
+    sql_evasoes_reais = """
+    WITH ultimo_lote AS (
+        SELECT MAX(id) AS lote_id
+        FROM importacao_evasao_lotes
+        WHERE status_processamento = 'processado'
+    ),
+
+    base AS (
+        SELECT
+            CASE
+
+                WHEN UPPER(TRIM(e.modalidade)) =
+                     UPPER('Iniciação Profissional')
+                    THEN 9
+
+                WHEN UPPER(TRIM(e.modalidade)) =
+                     UPPER(
+                         'Aperfeiçoamento/Especialização Profissional'
+                     )
+                    THEN 10
+
+                WHEN UPPER(TRIM(e.modalidade)) =
+                     UPPER('Qualificação Profissional')
+                    THEN 11
+
+                WHEN UPPER(TRIM(e.modalidade)) =
+                     UPPER('Aprendizagem Industrial básica')
+                    THEN 12
+
+                WHEN UPPER(TRIM(e.modalidade)) =
+                     UPPER(
+                         'Pós-Graduação "Lato-Sensu" - Especialização'
+                     )
+                    THEN 14
+
+                WHEN UPPER(TRIM(e.modalidade)) =
+                     UPPER('Habilitação Técnica de Nível Médio')
+                    THEN 15
+
+                WHEN UPPER(TRIM(e.modalidade)) =
+                     UPPER('Graduação Tecnológica')
+                    THEN 17
+
+                ELSE NULL
+
+            END AS cod_modalidade,
+
+            e.data_movimento
+
+        FROM importacao_evasao_linhas e
+
+        CROSS JOIN ultimo_lote ul
+
+        WHERE e.lote_id = ul.lote_id
+
+          AND e.flag_valida = TRUE
+
+          AND EXTRACT(
+                YEAR FROM e.data_movimento
+              )::int = $1
+    )
+
+    SELECT
+        b.cod_modalidade,
+
+        m.nome AS modalidade_nome,
+
+        COUNT(*) FILTER (
+            WHERE EXTRACT(
+                MONTH FROM b.data_movimento
+            )::int = 1
+        ) AS ev_jan,
+
+        COUNT(*) FILTER (
+            WHERE EXTRACT(
+                MONTH FROM b.data_movimento
+            )::int = 2
+        ) AS ev_fev,
+
+        COUNT(*) FILTER (
+            WHERE EXTRACT(
+                MONTH FROM b.data_movimento
+            )::int = 3
+        ) AS ev_mar,
+
+        COUNT(*) FILTER (
+            WHERE EXTRACT(
+                MONTH FROM b.data_movimento
+            )::int = 4
+        ) AS ev_abr,
+
+        COUNT(*) FILTER (
+            WHERE EXTRACT(
+                MONTH FROM b.data_movimento
+            )::int = 5
+        ) AS ev_mai,
+
+        COUNT(*) FILTER (
+            WHERE EXTRACT(
+                MONTH FROM b.data_movimento
+            )::int = 6
+        ) AS ev_jun,
+
+        COUNT(*) FILTER (
+            WHERE EXTRACT(
+                MONTH FROM b.data_movimento
+            )::int = 7
+        ) AS ev_jul,
+
+        COUNT(*) FILTER (
+            WHERE EXTRACT(
+                MONTH FROM b.data_movimento
+            )::int = 8
+        ) AS ev_ago,
+
+        COUNT(*) FILTER (
+            WHERE EXTRACT(
+                MONTH FROM b.data_movimento
+            )::int = 9
+        ) AS ev_set,
+
+        COUNT(*) FILTER (
+            WHERE EXTRACT(
+                MONTH FROM b.data_movimento
+            )::int = 10
+        ) AS ev_out,
+
+        COUNT(*) FILTER (
+            WHERE EXTRACT(
+                MONTH FROM b.data_movimento
+            )::int = 11
+        ) AS ev_nov,
+
+        COUNT(*) FILTER (
+            WHERE EXTRACT(
+                MONTH FROM b.data_movimento
+            )::int = 12
+        ) AS ev_dez,
+
+        COUNT(*) AS ev_total
+
+    FROM base b
+
+    JOIN modalidade m
+        ON m.codigo = b.cod_modalidade
+
+    WHERE b.cod_modalidade IS NOT NULL
+
+      AND (
+          $2::int IS NULL
+          OR b.cod_modalidade = $2::int
+      )
+
+    GROUP BY
+        b.cod_modalidade,
+        m.nome
+
+    ORDER BY
+        m.nome
+    """
+
+    # =========================================================
+    # PERDA FINANCEIRA - APERFEIÇOAMENTO PROFISSIONAL (10)
+    #
+    # REGRA:
+    # - somente Cursos Profissionalizantes (programa 3)
+    # - somente NÃO In Company
+    # - somente contratos PF com financeiro
+    # - somente evasões ocorridas durante a vigência do contrato
+    #
+    # IMPORTANTE:
+    # A perda não fica toda concentrada no mês da evasão.
+    # O valor financeiro restante é distribuído entre as
+    # competências posteriores à evasão até o fim do contrato.
+    #
+    # Dessa forma:
+    # - meses já transcorridos = perda realizada
+    # - meses futuros = perda futura ainda comprometida
+    # =========================================================
+
+    sql_perda_aperfeicoamento = """
+    WITH ultimo_lote_evasao AS (
+        SELECT MAX(id) AS lote_id
+        FROM importacao_evasao_lotes
+        WHERE status_processamento = 'processado'
+    ),
+
+    evasoes AS (
+        SELECT
+            e.id,
+            e.cod_turma,
+            e.tipo_evasao,
+            e.data_movimento::date AS data_movimento
+
+        FROM importacao_evasao_linhas e
+
+        CROSS JOIN ultimo_lote_evasao ul
+
+        WHERE e.lote_id = ul.lote_id
+          AND e.flag_valida = TRUE
+
+          AND EXTRACT(
+                YEAR FROM e.data_movimento
+              )::int = $1
+
+          AND UPPER(TRIM(e.modalidade)) =
+              UPPER(
+                  'Aperfeiçoamento/Especialização Profissional'
+              )
+    ),
+
+    contratos AS (
+        SELECT DISTINCT ON (
+            UPPER(TRIM(c.codturma))
+        )
+            UPPER(TRIM(c.codturma))
+                AS cod_turma_norm,
+
+            c.dtinicial::date AS dtinicial,
+            c.dtfinal::date AS dtfinal,
+
+            c.qtd_contratos::numeric
+                AS qtd_contratos,
+
+            c.valor_liquido::numeric
+                AS valor_liquido
+
+        FROM importacao_contratos_pf_linhas c
+
+        WHERE c.codturma IS NOT NULL
+
+          AND COALESCE(
+                c.qtd_contratos,
+                0
+              ) > 0
+
+          AND COALESCE(
+                c.valor_liquido,
+                0
+              ) > 0
+
+        ORDER BY
+            UPPER(TRIM(c.codturma)),
+            c.lote_id DESC,
+            c.id DESC
+    ),
+
+    base AS (
+        SELECT
+            e.id,
+            e.cod_turma,
+            e.data_movimento,
+
+            c.dtinicial,
+            c.dtfinal,
+
+            (
+                c.valor_liquido
+                / NULLIF(
+                    c.qtd_contratos,
+                    0
+                )
+            ) AS valor_liquido_aluno,
+
+            (
+                c.dtfinal
+                - c.dtinicial
+                + 1
+            )::numeric AS dias_totais,
+
+            /*
+             * A perda começa no dia seguinte à evasão.
+             *
+             * Isso mantém a mesma lógica que já validamos:
+             *
+             * dias_restantes =
+             * dtfinal - data_movimento
+             */
+            (
+                e.data_movimento
+                + INTERVAL '1 day'
+            )::date AS inicio_perda
+
+        FROM evasoes e
+
+        JOIN turmas t
+          ON UPPER(TRIM(t.codigo_sge)) =
+             UPPER(TRIM(e.cod_turma))
+
+        JOIN contratos c
+          ON c.cod_turma_norm =
+             UPPER(TRIM(e.cod_turma))
+
+        WHERE t.cod_programa = 3
+
+          AND t.incompany IS FALSE
+
+          AND e.data_movimento >= c.dtinicial
+          AND e.data_movimento < c.dtfinal
+    ),
+
+    meses AS (
+        SELECT
+            generate_series(
+                1,
+                12
+            )::int AS mes
+    ),
+
+    competencias AS (
+        SELECT
+            b.id,
+            b.cod_turma,
+
+            m.mes,
+
+            b.valor_liquido_aluno,
+            b.dias_totais,
+
+            /*
+             * Primeiro dia da competência
+             */
+            make_date(
+                $1,
+                m.mes,
+                1
+            )::date AS inicio_mes,
+
+            /*
+             * Último dia da competência
+             */
+            (
+                date_trunc(
+                    'month',
+                    make_date(
+                        $1,
+                        m.mes,
+                        1
+                    )::date
+                )
+                + INTERVAL '1 month'
+                - INTERVAL '1 day'
+            )::date AS fim_mes,
+
+            b.inicio_perda,
+            b.dtfinal
+
+        FROM base b
+
+        CROSS JOIN meses m
+    ),
+
+    perdas_mensais AS (
+        SELECT
+            id,
+            cod_turma,
+            mes,
+
+            /*
+             * Quantidade de dias da perda que pertence
+             * àquela competência.
+             */
+            CASE
+                WHEN
+                    fim_mes >= inicio_perda
+                    AND inicio_mes <= dtfinal
+                THEN
+                    (
+                        LEAST(
+                            fim_mes,
+                            dtfinal
+                        )
+                        -
+                        GREATEST(
+                            inicio_mes,
+                            inicio_perda
+                        )
+                        + 1
+                    )::numeric
+
+                ELSE 0
+            END AS dias_perdidos_mes,
+
+            valor_liquido_aluno,
+            dias_totais
+
+        FROM competencias
+    ),
+
+    calculo AS (
+        SELECT
+            id,
+            cod_turma,
+            mes,
+
+            dias_perdidos_mes,
+
+            CASE
+                WHEN dias_perdidos_mes > 0
+                THEN
+                    valor_liquido_aluno
+                    *
+                    (
+                        dias_perdidos_mes
+                        / NULLIF(
+                            dias_totais,
+                            0
+                        )
+                    )
+
+                ELSE 0
+            END AS perda_estimada
+
+        FROM perdas_mensais
+    )
+
+    SELECT
+
+        /*
+         * EVADIDOS COM IMPACTO FINANCEIRO PF
+         * EM CADA COMPETÊNCIA
+         */
+
+        COUNT(*) FILTER (
+            WHERE mes = 1
+              AND dias_perdidos_mes > 0
+        ) AS ev_jan,
+
+        COUNT(*) FILTER (
+            WHERE mes = 2
+              AND dias_perdidos_mes > 0
+        ) AS ev_fev,
+
+        COUNT(*) FILTER (
+            WHERE mes = 3
+              AND dias_perdidos_mes > 0
+        ) AS ev_mar,
+
+        COUNT(*) FILTER (
+            WHERE mes = 4
+              AND dias_perdidos_mes > 0
+        ) AS ev_abr,
+
+        COUNT(*) FILTER (
+            WHERE mes = 5
+              AND dias_perdidos_mes > 0
+        ) AS ev_mai,
+
+        COUNT(*) FILTER (
+            WHERE mes = 6
+              AND dias_perdidos_mes > 0
+        ) AS ev_jun,
+
+        COUNT(*) FILTER (
+            WHERE mes = 7
+              AND dias_perdidos_mes > 0
+        ) AS ev_jul,
+
+        COUNT(*) FILTER (
+            WHERE mes = 8
+              AND dias_perdidos_mes > 0
+        ) AS ev_ago,
+
+        COUNT(*) FILTER (
+            WHERE mes = 9
+              AND dias_perdidos_mes > 0
+        ) AS ev_set,
+
+        COUNT(*) FILTER (
+            WHERE mes = 10
+              AND dias_perdidos_mes > 0
+        ) AS ev_out,
+
+        COUNT(*) FILTER (
+            WHERE mes = 11
+              AND dias_perdidos_mes > 0
+        ) AS ev_nov,
+
+        COUNT(*) FILTER (
+            WHERE mes = 12
+              AND dias_perdidos_mes > 0
+        ) AS ev_dez,
+
+
+        /*
+         * TOTAL DE EVASÕES ÚNICAS COM IMPACTO PF
+         */
+
+        COUNT(
+            DISTINCT id
+        ) FILTER (
+            WHERE dias_perdidos_mes > 0
+        ) AS ev_total,
+
+        COUNT(
+            DISTINCT id
+        ) FILTER (
+            WHERE dias_perdidos_mes > 0
+            AND mes BETWEEN $2 AND $3
+        ) AS ev_periodo,
+
+
+        /*
+         * PERDA FINANCEIRA POR COMPETÊNCIA
+         */
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 1),
+            0
+        ) AS jan,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 2),
+            0
+        ) AS fev,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 3),
+            0
+        ) AS mar,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 4),
+            0
+        ) AS abr,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 5),
+            0
+        ) AS mai,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 6),
+            0
+        ) AS jun,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 7),
+            0
+        ) AS jul,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 8),
+            0
+        ) AS ago,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 9),
+            0
+        ) AS "set",
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 10),
+            0
+        ) AS "out",
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 11),
+            0
+        ) AS nov,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 12),
+            0
+        ) AS dez,
+
+        COALESCE(
+            SUM(perda_estimada),
+            0
+        ) AS total
+
+    FROM calculo
+    """
+
+    # =========================================================
+    # PERDA FINANCEIRA - INICIAÇÃO PROFISSIONAL (9)
+    #
+    # REGRA:
+    # - programas 3 (Cursos Profissionalizantes)
+    #   e 23 (Unidades Móveis)
+    # - somente NÃO In Company
+    # - somente contratos PF com financeiro
+    # - somente evasões ocorridas durante a vigência do contrato
+    #
+    # A perda é distribuída pelas competências restantes
+    # até o fim do contrato.
+    # =========================================================
+
+    sql_perda_iniciacao = """
+    WITH ultimo_lote_evasao AS (
+        SELECT MAX(id) AS lote_id
+        FROM importacao_evasao_lotes
+        WHERE status_processamento = 'processado'
+    ),
+
+    evasoes AS (
+        SELECT
+            e.id,
+            e.cod_turma,
+            e.data_movimento::date AS data_movimento
+
+        FROM importacao_evasao_linhas e
+
+        CROSS JOIN ultimo_lote_evasao ul
+
+        WHERE e.lote_id = ul.lote_id
+          AND e.flag_valida = TRUE
+
+          AND EXTRACT(
+                YEAR FROM e.data_movimento
+              )::int = $1
+
+          AND UPPER(TRIM(e.modalidade)) =
+              UPPER('Iniciação Profissional')
+    ),
+
+    contratos AS (
+        SELECT DISTINCT ON (
+            UPPER(TRIM(c.codturma))
+        )
+            UPPER(TRIM(c.codturma))
+                AS cod_turma_norm,
+
+            c.dtinicial::date AS dtinicial,
+            c.dtfinal::date AS dtfinal,
+
+            c.qtd_contratos::numeric
+                AS qtd_contratos,
+
+            c.valor_liquido::numeric
+                AS valor_liquido
+
+        FROM importacao_contratos_pf_linhas c
+
+        WHERE c.codturma IS NOT NULL
+
+          AND COALESCE(
+                c.qtd_contratos,
+                0
+              ) > 0
+
+          AND COALESCE(
+                c.valor_liquido,
+                0
+              ) > 0
+
+        ORDER BY
+            UPPER(TRIM(c.codturma)),
+            c.lote_id DESC,
+            c.id DESC
+    ),
+
+    base AS (
+        SELECT
+            e.id,
+            e.cod_turma,
+            e.data_movimento,
+
+            c.dtinicial,
+            c.dtfinal,
+
+            (
+                c.valor_liquido
+                / NULLIF(
+                    c.qtd_contratos,
+                    0
+                )
+            ) AS valor_liquido_aluno,
+
+            (
+                c.dtfinal
+                - c.dtinicial
+                + 1
+            )::numeric AS dias_totais,
+
+            (
+                e.data_movimento
+                + INTERVAL '1 day'
+            )::date AS inicio_perda
+
+        FROM evasoes e
+
+        JOIN turmas t
+          ON UPPER(TRIM(t.codigo_sge)) =
+             UPPER(TRIM(e.cod_turma))
+
+        JOIN contratos c
+          ON c.cod_turma_norm =
+             UPPER(TRIM(e.cod_turma))
+
+        WHERE t.cod_programa IN (3, 23)
+
+          AND t.incompany IS FALSE
+
+          AND e.data_movimento >= c.dtinicial
+          AND e.data_movimento < c.dtfinal
+    ),
+
+    meses AS (
+        SELECT
+            generate_series(
+                1,
+                12
+            )::int AS mes
+    ),
+
+    competencias AS (
+        SELECT
+            b.id,
+            b.cod_turma,
+            m.mes,
+
+            b.valor_liquido_aluno,
+            b.dias_totais,
+
+            make_date(
+                $1,
+                m.mes,
+                1
+            )::date AS inicio_mes,
+
+            (
+                date_trunc(
+                    'month',
+                    make_date(
+                        $1,
+                        m.mes,
+                        1
+                    )::date
+                )
+                + INTERVAL '1 month'
+                - INTERVAL '1 day'
+            )::date AS fim_mes,
+
+            b.inicio_perda,
+            b.dtfinal
+
+        FROM base b
+
+        CROSS JOIN meses m
+    ),
+
+    perdas_mensais AS (
+        SELECT
+            id,
+            cod_turma,
+            mes,
+
+            CASE
+                WHEN
+                    fim_mes >= inicio_perda
+                    AND inicio_mes <= dtfinal
+                THEN
+                    (
+                        LEAST(
+                            fim_mes,
+                            dtfinal
+                        )
+                        -
+                        GREATEST(
+                            inicio_mes,
+                            inicio_perda
+                        )
+                        + 1
+                    )::numeric
+
+                ELSE 0
+            END AS dias_perdidos_mes,
+
+            valor_liquido_aluno,
+            dias_totais
+
+        FROM competencias
+    ),
+
+    calculo AS (
+        SELECT
+            id,
+            cod_turma,
+            mes,
+
+            dias_perdidos_mes,
+
+            CASE
+                WHEN dias_perdidos_mes > 0
+                THEN
+                    valor_liquido_aluno
+                    *
+                    (
+                        dias_perdidos_mes
+                        / NULLIF(
+                            dias_totais,
+                            0
+                        )
+                    )
+
+                ELSE 0
+            END AS perda_estimada
+
+        FROM perdas_mensais
+    )
+
+    SELECT
+
+        COUNT(*) FILTER (
+            WHERE mes = 1
+              AND dias_perdidos_mes > 0
+        ) AS ev_jan,
+
+        COUNT(*) FILTER (
+            WHERE mes = 2
+              AND dias_perdidos_mes > 0
+        ) AS ev_fev,
+
+        COUNT(*) FILTER (
+            WHERE mes = 3
+              AND dias_perdidos_mes > 0
+        ) AS ev_mar,
+
+        COUNT(*) FILTER (
+            WHERE mes = 4
+              AND dias_perdidos_mes > 0
+        ) AS ev_abr,
+
+        COUNT(*) FILTER (
+            WHERE mes = 5
+              AND dias_perdidos_mes > 0
+        ) AS ev_mai,
+
+        COUNT(*) FILTER (
+            WHERE mes = 6
+              AND dias_perdidos_mes > 0
+        ) AS ev_jun,
+
+        COUNT(*) FILTER (
+            WHERE mes = 7
+              AND dias_perdidos_mes > 0
+        ) AS ev_jul,
+
+        COUNT(*) FILTER (
+            WHERE mes = 8
+              AND dias_perdidos_mes > 0
+        ) AS ev_ago,
+
+        COUNT(*) FILTER (
+            WHERE mes = 9
+              AND dias_perdidos_mes > 0
+        ) AS ev_set,
+
+        COUNT(*) FILTER (
+            WHERE mes = 10
+              AND dias_perdidos_mes > 0
+        ) AS ev_out,
+
+        COUNT(*) FILTER (
+            WHERE mes = 11
+              AND dias_perdidos_mes > 0
+        ) AS ev_nov,
+
+        COUNT(*) FILTER (
+            WHERE mes = 12
+              AND dias_perdidos_mes > 0
+        ) AS ev_dez,
+
+
+        COUNT(
+            DISTINCT id
+        ) FILTER (
+            WHERE dias_perdidos_mes > 0
+        ) AS ev_total,
+
+        COUNT(
+            DISTINCT id
+        ) FILTER (
+            WHERE dias_perdidos_mes > 0
+            AND mes BETWEEN $2 AND $3
+        ) AS ev_periodo,
+
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 1),
+            0
+        ) AS jan,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 2),
+            0
+        ) AS fev,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 3),
+            0
+        ) AS mar,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 4),
+            0
+        ) AS abr,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 5),
+            0
+        ) AS mai,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 6),
+            0
+        ) AS jun,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 7),
+            0
+        ) AS jul,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 8),
+            0
+        ) AS ago,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 9),
+            0
+        ) AS "set",
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 10),
+            0
+        ) AS "out",
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 11),
+            0
+        ) AS nov,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 12),
+            0
+        ) AS dez,
+
+        COALESCE(
+            SUM(perda_estimada),
+            0
+        ) AS total
+
+    FROM calculo
+    """
+
+    # =========================================================
+    # PERDA FINANCEIRA - QUALIFICAÇÃO PROFISSIONAL (11)
+    #
+    # REGRA:
+    # - programa 3 (Cursos Profissionalizantes)
+    # - somente NÃO In Company
+    # - somente contratos PF com financeiro
+    # - somente evasões ocorridas durante a vigência do contrato
+    # - inclui DESISTENTE e EVADIDO
+    #
+    # A perda é distribuída pelas competências restantes
+    # até o fim do contrato.
+    # =========================================================
+
+    sql_perda_qualificacao = """
+    WITH ultimo_lote_evasao AS (
+        SELECT MAX(id) AS lote_id
+        FROM importacao_evasao_lotes
+        WHERE status_processamento = 'processado'
+    ),
+
+    evasoes AS (
+        SELECT
+            e.id,
+            e.cod_turma,
+            e.tipo_evasao,
+            e.data_movimento::date AS data_movimento
+
+        FROM importacao_evasao_linhas e
+
+        CROSS JOIN ultimo_lote_evasao ul
+
+        WHERE e.lote_id = ul.lote_id
+          AND e.flag_valida = TRUE
+
+          AND EXTRACT(
+                YEAR FROM e.data_movimento
+              )::int = $1
+
+          AND UPPER(TRIM(e.modalidade)) =
+              UPPER('Qualificação Profissional')
+    ),
+
+    contratos AS (
+        SELECT DISTINCT ON (
+            UPPER(TRIM(c.codturma))
+        )
+            UPPER(TRIM(c.codturma))
+                AS cod_turma_norm,
+
+            c.dtinicial::date AS dtinicial,
+            c.dtfinal::date AS dtfinal,
+
+            c.qtd_contratos::numeric
+                AS qtd_contratos,
+
+            c.valor_liquido::numeric
+                AS valor_liquido
+
+        FROM importacao_contratos_pf_linhas c
+
+        WHERE c.codturma IS NOT NULL
+
+          AND COALESCE(
+                c.qtd_contratos,
+                0
+              ) > 0
+
+          AND COALESCE(
+                c.valor_liquido,
+                0
+              ) > 0
+
+        ORDER BY
+            UPPER(TRIM(c.codturma)),
+            c.lote_id DESC,
+            c.id DESC
+    ),
+
+    base AS (
+        SELECT
+            e.id,
+            e.cod_turma,
+            e.tipo_evasao,
+            e.data_movimento,
+
+            c.dtinicial,
+            c.dtfinal,
+
+            (
+                c.valor_liquido
+                / NULLIF(
+                    c.qtd_contratos,
+                    0
+                )
+            ) AS valor_liquido_aluno,
+
+            (
+                c.dtfinal
+                - c.dtinicial
+                + 1
+            )::numeric AS dias_totais,
+
+            (
+                e.data_movimento
+                + INTERVAL '1 day'
+            )::date AS inicio_perda
+
+        FROM evasoes e
+
+        JOIN turmas t
+          ON UPPER(TRIM(t.codigo_sge)) =
+             UPPER(TRIM(e.cod_turma))
+
+        JOIN contratos c
+          ON c.cod_turma_norm =
+             UPPER(TRIM(e.cod_turma))
+
+        WHERE t.cod_programa = 3
+
+          AND t.incompany IS FALSE
+
+          AND e.data_movimento >= c.dtinicial
+          AND e.data_movimento < c.dtfinal
+    ),
+
+    meses AS (
+        SELECT
+            generate_series(
+                1,
+                12
+            )::int AS mes
+    ),
+
+    competencias AS (
+        SELECT
+            b.id,
+            b.cod_turma,
+            b.tipo_evasao,
+
+            m.mes,
+
+            b.valor_liquido_aluno,
+            b.dias_totais,
+
+            make_date(
+                $1,
+                m.mes,
+                1
+            )::date AS inicio_mes,
+
+            (
+                date_trunc(
+                    'month',
+                    make_date(
+                        $1,
+                        m.mes,
+                        1
+                    )::date
+                )
+                + INTERVAL '1 month'
+                - INTERVAL '1 day'
+            )::date AS fim_mes,
+
+            b.inicio_perda,
+            b.dtfinal
+
+        FROM base b
+
+        CROSS JOIN meses m
+    ),
+
+    perdas_mensais AS (
+        SELECT
+            id,
+            cod_turma,
+            tipo_evasao,
+            mes,
+
+            CASE
+                WHEN
+                    fim_mes >= inicio_perda
+                    AND inicio_mes <= dtfinal
+                THEN
+                    (
+                        LEAST(
+                            fim_mes,
+                            dtfinal
+                        )
+                        -
+                        GREATEST(
+                            inicio_mes,
+                            inicio_perda
+                        )
+                        + 1
+                    )::numeric
+
+                ELSE 0
+            END AS dias_perdidos_mes,
+
+            valor_liquido_aluno,
+            dias_totais
+
+        FROM competencias
+    ),
+
+    calculo AS (
+        SELECT
+            id,
+            cod_turma,
+            tipo_evasao,
+            mes,
+
+            dias_perdidos_mes,
+
+            CASE
+                WHEN dias_perdidos_mes > 0
+                THEN
+                    valor_liquido_aluno
+                    *
+                    (
+                        dias_perdidos_mes
+                        / NULLIF(
+                            dias_totais,
+                            0
+                        )
+                    )
+
+                ELSE 0
+            END AS perda_estimada
+
+        FROM perdas_mensais
+    )
+
+    SELECT
+
+        COUNT(*) FILTER (
+            WHERE mes = 1
+              AND dias_perdidos_mes > 0
+        ) AS ev_jan,
+
+        COUNT(*) FILTER (
+            WHERE mes = 2
+              AND dias_perdidos_mes > 0
+        ) AS ev_fev,
+
+        COUNT(*) FILTER (
+            WHERE mes = 3
+              AND dias_perdidos_mes > 0
+        ) AS ev_mar,
+
+        COUNT(*) FILTER (
+            WHERE mes = 4
+              AND dias_perdidos_mes > 0
+        ) AS ev_abr,
+
+        COUNT(*) FILTER (
+            WHERE mes = 5
+              AND dias_perdidos_mes > 0
+        ) AS ev_mai,
+
+        COUNT(*) FILTER (
+            WHERE mes = 6
+              AND dias_perdidos_mes > 0
+        ) AS ev_jun,
+
+        COUNT(*) FILTER (
+            WHERE mes = 7
+              AND dias_perdidos_mes > 0
+        ) AS ev_jul,
+
+        COUNT(*) FILTER (
+            WHERE mes = 8
+              AND dias_perdidos_mes > 0
+        ) AS ev_ago,
+
+        COUNT(*) FILTER (
+            WHERE mes = 9
+              AND dias_perdidos_mes > 0
+        ) AS ev_set,
+
+        COUNT(*) FILTER (
+            WHERE mes = 10
+              AND dias_perdidos_mes > 0
+        ) AS ev_out,
+
+        COUNT(*) FILTER (
+            WHERE mes = 11
+              AND dias_perdidos_mes > 0
+        ) AS ev_nov,
+
+        COUNT(*) FILTER (
+            WHERE mes = 12
+              AND dias_perdidos_mes > 0
+        ) AS ev_dez,
+
+
+        COUNT(
+            DISTINCT id
+        ) FILTER (
+            WHERE dias_perdidos_mes > 0
+        ) AS ev_total,
+
+        COUNT(
+            DISTINCT id
+        ) FILTER (
+            WHERE dias_perdidos_mes > 0
+            AND mes BETWEEN $2 AND $3
+        ) AS ev_periodo,
+
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 1),
+            0
+        ) AS jan,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 2),
+            0
+        ) AS fev,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 3),
+            0
+        ) AS mar,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 4),
+            0
+        ) AS abr,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 5),
+            0
+        ) AS mai,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 6),
+            0
+        ) AS jun,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 7),
+            0
+        ) AS jul,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 8),
+            0
+        ) AS ago,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 9),
+            0
+        ) AS "set",
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 10),
+            0
+        ) AS "out",
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 11),
+            0
+        ) AS nov,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 12),
+            0
+        ) AS dez,
+
+        COALESCE(
+            SUM(perda_estimada),
+            0
+        ) AS total
+
+    FROM calculo
+    """
+
+    # =========================================================
+    # PERDA FINANCEIRA - PÓS-GRADUAÇÃO (14)
+    #
+    # REGRA:
+    # - programa 18 (Cursos Superiores)
+    # - somente NÃO In Company
+    # - somente contratos PF com financeiro
+    # - somente evasões ocorridas durante a vigência do contrato
+    #
+    # A perda é distribuída pelas competências restantes
+    # até o fim do contrato.
+    # =========================================================
+
+    sql_perda_pos_graduacao = """
+    WITH ultimo_lote_evasao AS (
+        SELECT MAX(id) AS lote_id
+        FROM importacao_evasao_lotes
+        WHERE status_processamento = 'processado'
+    ),
+
+    evasoes AS (
+        SELECT
+            e.id,
+            e.cod_turma,
+            e.tipo_evasao,
+            e.data_movimento::date AS data_movimento
+
+        FROM importacao_evasao_linhas e
+
+        CROSS JOIN ultimo_lote_evasao ul
+
+        WHERE e.lote_id = ul.lote_id
+          AND e.flag_valida = TRUE
+
+          AND EXTRACT(
+                YEAR FROM e.data_movimento
+              )::int = $1
+
+          AND UPPER(TRIM(e.modalidade)) =
+              UPPER(
+                  'Pós-Graduação "Lato-Sensu" - Especialização'
+              )
+    ),
+
+    contratos AS (
+        SELECT DISTINCT ON (
+            UPPER(TRIM(c.codturma))
+        )
+            UPPER(TRIM(c.codturma))
+                AS cod_turma_norm,
+
+            c.dtinicial::date AS dtinicial,
+            c.dtfinal::date AS dtfinal,
+
+            c.qtd_contratos::numeric
+                AS qtd_contratos,
+
+            c.valor_liquido::numeric
+                AS valor_liquido
+
+        FROM importacao_contratos_pf_linhas c
+
+        WHERE c.codturma IS NOT NULL
+
+          AND COALESCE(
+                c.qtd_contratos,
+                0
+              ) > 0
+
+          AND COALESCE(
+                c.valor_liquido,
+                0
+              ) > 0
+
+        ORDER BY
+            UPPER(TRIM(c.codturma)),
+            c.lote_id DESC,
+            c.id DESC
+    ),
+
+    base AS (
+        SELECT
+            e.id,
+            e.cod_turma,
+            e.tipo_evasao,
+            e.data_movimento,
+
+            c.dtinicial,
+            c.dtfinal,
+
+            (
+                c.valor_liquido
+                / NULLIF(
+                    c.qtd_contratos,
+                    0
+                )
+            ) AS valor_liquido_aluno,
+
+            (
+                c.dtfinal
+                - c.dtinicial
+                + 1
+            )::numeric AS dias_totais,
+
+            (
+                e.data_movimento
+                + INTERVAL '1 day'
+            )::date AS inicio_perda
+
+        FROM evasoes e
+
+        JOIN turmas t
+          ON UPPER(TRIM(t.codigo_sge)) =
+             UPPER(TRIM(e.cod_turma))
+
+        JOIN contratos c
+          ON c.cod_turma_norm =
+             UPPER(TRIM(e.cod_turma))
+
+        WHERE t.cod_programa = 18
+
+          AND t.incompany IS FALSE
+
+          AND e.data_movimento >= c.dtinicial
+          AND e.data_movimento < c.dtfinal
+    ),
+
+    meses AS (
+        SELECT
+            generate_series(
+                1,
+                12
+            )::int AS mes
+    ),
+
+    competencias AS (
+        SELECT
+            b.id,
+            b.cod_turma,
+            b.tipo_evasao,
+
+            m.mes,
+
+            b.valor_liquido_aluno,
+            b.dias_totais,
+
+            make_date(
+                $1,
+                m.mes,
+                1
+            )::date AS inicio_mes,
+
+            (
+                date_trunc(
+                    'month',
+                    make_date(
+                        $1,
+                        m.mes,
+                        1
+                    )::date
+                )
+                + INTERVAL '1 month'
+                - INTERVAL '1 day'
+            )::date AS fim_mes,
+
+            b.inicio_perda,
+            b.dtfinal
+
+        FROM base b
+
+        CROSS JOIN meses m
+    ),
+
+    perdas_mensais AS (
+        SELECT
+            id,
+            cod_turma,
+            tipo_evasao,
+            mes,
+
+            CASE
+                WHEN
+                    fim_mes >= inicio_perda
+                    AND inicio_mes <= dtfinal
+                THEN
+                    (
+                        LEAST(
+                            fim_mes,
+                            dtfinal
+                        )
+                        -
+                        GREATEST(
+                            inicio_mes,
+                            inicio_perda
+                        )
+                        + 1
+                    )::numeric
+
+                ELSE 0
+            END AS dias_perdidos_mes,
+
+            valor_liquido_aluno,
+            dias_totais
+
+        FROM competencias
+    ),
+
+    calculo AS (
+        SELECT
+            id,
+            cod_turma,
+            tipo_evasao,
+            mes,
+
+            dias_perdidos_mes,
+
+            CASE
+                WHEN dias_perdidos_mes > 0
+                THEN
+                    valor_liquido_aluno
+                    *
+                    (
+                        dias_perdidos_mes
+                        / NULLIF(
+                            dias_totais,
+                            0
+                        )
+                    )
+
+                ELSE 0
+            END AS perda_estimada
+
+        FROM perdas_mensais
+    )
+
+    SELECT
+
+        COUNT(*) FILTER (
+            WHERE mes = 1
+              AND dias_perdidos_mes > 0
+        ) AS ev_jan,
+
+        COUNT(*) FILTER (
+            WHERE mes = 2
+              AND dias_perdidos_mes > 0
+        ) AS ev_fev,
+
+        COUNT(*) FILTER (
+            WHERE mes = 3
+              AND dias_perdidos_mes > 0
+        ) AS ev_mar,
+
+        COUNT(*) FILTER (
+            WHERE mes = 4
+              AND dias_perdidos_mes > 0
+        ) AS ev_abr,
+
+        COUNT(*) FILTER (
+            WHERE mes = 5
+              AND dias_perdidos_mes > 0
+        ) AS ev_mai,
+
+        COUNT(*) FILTER (
+            WHERE mes = 6
+              AND dias_perdidos_mes > 0
+        ) AS ev_jun,
+
+        COUNT(*) FILTER (
+            WHERE mes = 7
+              AND dias_perdidos_mes > 0
+        ) AS ev_jul,
+
+        COUNT(*) FILTER (
+            WHERE mes = 8
+              AND dias_perdidos_mes > 0
+        ) AS ev_ago,
+
+        COUNT(*) FILTER (
+            WHERE mes = 9
+              AND dias_perdidos_mes > 0
+        ) AS ev_set,
+
+        COUNT(*) FILTER (
+            WHERE mes = 10
+              AND dias_perdidos_mes > 0
+        ) AS ev_out,
+
+        COUNT(*) FILTER (
+            WHERE mes = 11
+              AND dias_perdidos_mes > 0
+        ) AS ev_nov,
+
+        COUNT(*) FILTER (
+            WHERE mes = 12
+              AND dias_perdidos_mes > 0
+        ) AS ev_dez,
+
+
+        COUNT(
+            DISTINCT id
+        ) FILTER (
+            WHERE dias_perdidos_mes > 0
+        ) AS ev_total,
+
+        COUNT(
+            DISTINCT id
+        ) FILTER (
+            WHERE dias_perdidos_mes > 0
+            AND mes BETWEEN $2 AND $3
+        ) AS ev_periodo,
+
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 1),
+            0
+        ) AS jan,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 2),
+            0
+        ) AS fev,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 3),
+            0
+        ) AS mar,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 4),
+            0
+        ) AS abr,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 5),
+            0
+        ) AS mai,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 6),
+            0
+        ) AS jun,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 7),
+            0
+        ) AS jul,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 8),
+            0
+        ) AS ago,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 9),
+            0
+        ) AS "set",
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 10),
+            0
+        ) AS "out",
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 11),
+            0
+        ) AS nov,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 12),
+            0
+        ) AS dez,
+
+        COALESCE(
+            SUM(perda_estimada),
+            0
+        ) AS total
+
+    FROM calculo
+    """
+
+    # =========================================================
+    # PERDA FINANCEIRA - GRADUAÇÃO TECNOLÓGICA (17)
+    #
+    # REGRA:
+    # - programa 18 (Cursos Superiores)
+    # - somente contratos PF com financeiro
+    # - evasão ANTES DO INÍCIO:
+    #       perda desde o início do contrato
+    # - evasão DURANTE:
+    #       perda a partir do dia seguinte à evasão
+    # - evasão APÓS O FIM:
+    #       não gera perda financeira
+    #
+    # A perda é distribuída pelas competências restantes
+    # até o fim do contrato.
+    # =========================================================
+
+    sql_perda_graduacao = """
+    WITH ultimo_lote_evasao AS (
+        SELECT MAX(id) AS lote_id
+        FROM importacao_evasao_lotes
+        WHERE status_processamento = 'processado'
+    ),
+
+    evasoes AS (
+        SELECT
+            e.id,
+            e.cod_turma,
+            e.tipo_evasao,
+            e.data_movimento::date AS data_movimento
+
+        FROM importacao_evasao_linhas e
+
+        CROSS JOIN ultimo_lote_evasao ul
+
+        WHERE e.lote_id = ul.lote_id
+          AND e.flag_valida = TRUE
+
+          AND EXTRACT(
+                YEAR FROM e.data_movimento
+              )::int = $1
+
+          AND UPPER(TRIM(e.modalidade)) =
+              UPPER('Graduação Tecnológica')
+    ),
+
+    contratos AS (
+        SELECT DISTINCT ON (
+            UPPER(TRIM(c.codturma))
+        )
+            UPPER(TRIM(c.codturma))
+                AS cod_turma_norm,
+
+            c.dtinicial::date AS dtinicial,
+            c.dtfinal::date AS dtfinal,
+
+            c.qtd_contratos::numeric
+                AS qtd_contratos,
+
+            c.valor_liquido::numeric
+                AS valor_liquido
+
+        FROM importacao_contratos_pf_linhas c
+
+        WHERE c.codturma IS NOT NULL
+
+          AND COALESCE(
+                c.qtd_contratos,
+                0
+              ) > 0
+
+          AND COALESCE(
+                c.valor_liquido,
+                0
+              ) > 0
+
+        ORDER BY
+            UPPER(TRIM(c.codturma)),
+            c.lote_id DESC,
+            c.id DESC
+    ),
+
+    base AS (
+        SELECT
+            e.id,
+            e.cod_turma,
+            e.tipo_evasao,
+            e.data_movimento,
+
+            c.dtinicial,
+            c.dtfinal,
+
+            (
+                c.valor_liquido
+                / NULLIF(
+                    c.qtd_contratos,
+                    0
+                )
+            ) AS valor_liquido_aluno,
+
+            (
+                c.dtfinal
+                - c.dtinicial
+                + 1
+            )::numeric AS dias_totais,
+
+            /*
+             * ANTES DO INÍCIO:
+             * perda começa no primeiro dia do contrato.
+             *
+             * DURANTE:
+             * perda começa no dia seguinte à evasão.
+             */
+            CASE
+                WHEN e.data_movimento < c.dtinicial
+                THEN c.dtinicial
+
+                ELSE (
+                    e.data_movimento
+                    + INTERVAL '1 day'
+                )::date
+            END AS inicio_perda
+
+        FROM evasoes e
+
+        JOIN turmas t
+          ON UPPER(TRIM(t.codigo_sge)) =
+             UPPER(TRIM(e.cod_turma))
+
+        JOIN contratos c
+          ON c.cod_turma_norm =
+             UPPER(TRIM(e.cod_turma))
+
+        WHERE t.cod_programa = 18
+
+          /*
+           * Inclui:
+           * - antes do início
+           * - durante
+           *
+           * Exclui:
+           * - após o fim
+           */
+          AND e.data_movimento < c.dtfinal
+    ),
+
+    meses AS (
+        SELECT
+            generate_series(
+                1,
+                12
+            )::int AS mes
+    ),
+
+    competencias AS (
+        SELECT
+            b.id,
+            b.cod_turma,
+            b.tipo_evasao,
+
+            m.mes,
+
+            b.valor_liquido_aluno,
+            b.dias_totais,
+
+            make_date(
+                $1,
+                m.mes,
+                1
+            )::date AS inicio_mes,
+
+            (
+                date_trunc(
+                    'month',
+                    make_date(
+                        $1,
+                        m.mes,
+                        1
+                    )::date
+                )
+                + INTERVAL '1 month'
+                - INTERVAL '1 day'
+            )::date AS fim_mes,
+
+            b.inicio_perda,
+            b.dtfinal
+
+        FROM base b
+
+        CROSS JOIN meses m
+    ),
+
+    perdas_mensais AS (
+        SELECT
+            id,
+            cod_turma,
+            tipo_evasao,
+            mes,
+
+            CASE
+                WHEN
+                    fim_mes >= inicio_perda
+                    AND inicio_mes <= dtfinal
+                THEN
+                    (
+                        LEAST(
+                            fim_mes,
+                            dtfinal
+                        )
+                        -
+                        GREATEST(
+                            inicio_mes,
+                            inicio_perda
+                        )
+                        + 1
+                    )::numeric
+
+                ELSE 0
+            END AS dias_perdidos_mes,
+
+            valor_liquido_aluno,
+            dias_totais
+
+        FROM competencias
+    ),
+
+    calculo AS (
+        SELECT
+            id,
+            cod_turma,
+            tipo_evasao,
+            mes,
+
+            dias_perdidos_mes,
+
+            CASE
+                WHEN dias_perdidos_mes > 0
+                THEN
+                    valor_liquido_aluno
+                    *
+                    (
+                        dias_perdidos_mes
+                        / NULLIF(
+                            dias_totais,
+                            0
+                        )
+                    )
+
+                ELSE 0
+            END AS perda_estimada
+
+        FROM perdas_mensais
+    )
+
+    SELECT
+
+        COUNT(*) FILTER (
+            WHERE mes = 1
+              AND dias_perdidos_mes > 0
+        ) AS ev_jan,
+
+        COUNT(*) FILTER (
+            WHERE mes = 2
+              AND dias_perdidos_mes > 0
+        ) AS ev_fev,
+
+        COUNT(*) FILTER (
+            WHERE mes = 3
+              AND dias_perdidos_mes > 0
+        ) AS ev_mar,
+
+        COUNT(*) FILTER (
+            WHERE mes = 4
+              AND dias_perdidos_mes > 0
+        ) AS ev_abr,
+
+        COUNT(*) FILTER (
+            WHERE mes = 5
+              AND dias_perdidos_mes > 0
+        ) AS ev_mai,
+
+        COUNT(*) FILTER (
+            WHERE mes = 6
+              AND dias_perdidos_mes > 0
+        ) AS ev_jun,
+
+        COUNT(*) FILTER (
+            WHERE mes = 7
+              AND dias_perdidos_mes > 0
+        ) AS ev_jul,
+
+        COUNT(*) FILTER (
+            WHERE mes = 8
+              AND dias_perdidos_mes > 0
+        ) AS ev_ago,
+
+        COUNT(*) FILTER (
+            WHERE mes = 9
+              AND dias_perdidos_mes > 0
+        ) AS ev_set,
+
+        COUNT(*) FILTER (
+            WHERE mes = 10
+              AND dias_perdidos_mes > 0
+        ) AS ev_out,
+
+        COUNT(*) FILTER (
+            WHERE mes = 11
+              AND dias_perdidos_mes > 0
+        ) AS ev_nov,
+
+        COUNT(*) FILTER (
+            WHERE mes = 12
+              AND dias_perdidos_mes > 0
+        ) AS ev_dez,
+
+
+        COUNT(
+            DISTINCT id
+        ) FILTER (
+            WHERE dias_perdidos_mes > 0
+        ) AS ev_total,
+
+        COUNT(
+            DISTINCT id
+        ) FILTER (
+            WHERE dias_perdidos_mes > 0
+            AND mes BETWEEN $2 AND $3
+        ) AS ev_periodo,
+
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 1),
+            0
+        ) AS jan,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 2),
+            0
+        ) AS fev,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 3),
+            0
+        ) AS mar,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 4),
+            0
+        ) AS abr,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 5),
+            0
+        ) AS mai,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 6),
+            0
+        ) AS jun,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 7),
+            0
+        ) AS jul,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 8),
+            0
+        ) AS ago,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 9),
+            0
+        ) AS "set",
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 10),
+            0
+        ) AS "out",
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 11),
+            0
+        ) AS nov,
+
+        COALESCE(
+            SUM(perda_estimada)
+            FILTER (WHERE mes = 12),
+            0
+        ) AS dez,
+
+        COALESCE(
+            SUM(perda_estimada),
+            0
+        ) AS total
+
+    FROM calculo
+    """
+
+    async with pool.acquire() as conn:
+
+        rows = await conn.fetch(
+            sql,
+            ano,
+            modalidade
+        )
+
+        rows_evasoes = await conn.fetch(
+            sql_evasoes_reais,
+            ano,
+            modalidade
+        )
+
+        perda_aperfeicoamento = await conn.fetchrow(
+            sql_perda_aperfeicoamento,
+            ano,
+            mes_inicio,
+            mes_fim
+        )
+
+        perda_iniciacao = await conn.fetchrow(
+            sql_perda_iniciacao,
+            ano,
+            mes_inicio,
+            mes_fim
+        )
+
+        perda_qualificacao = await conn.fetchrow(
+            sql_perda_qualificacao,
+            ano,
+            mes_inicio,
+            mes_fim
+        )
+
+        perda_pos_graduacao = await conn.fetchrow(
+            sql_perda_pos_graduacao,
+            ano,
+            mes_inicio,
+            mes_fim
+        )
+
+        perda_graduacao = await conn.fetchrow(
+            sql_perda_graduacao,
+            ano,
+            mes_inicio,
+            mes_fim
+        )
+
+    resultado = []
+
+    # =========================================================
+    # INDEXA A RECEITA ANTIGA POR MODALIDADE
+    #
+    # Por enquanto, ela continua sendo usada para as
+    # modalidades que ainda não migramos financeiramente.
+    # =========================================================
+
+    receita_por_modalidade = {
+        int(r["cod_modalidade"]): r
         for r in rows
-    ]
+        if r["cod_modalidade"] is not None
+    }
+
+
+    # =========================================================
+    # MONTA O RESULTADO A PARTIR DAS EVASÕES REAIS
+    # =========================================================
+
+    for e in rows_evasoes:
+
+        cod_modalidade = int(
+            e["cod_modalidade"]
+        )
+
+        # -----------------------------------------------------
+        # HABILITAÇÃO TÉCNICA
+        #
+        # Na visão consolidada, ela será adicionada depois
+        # pelo cálculo novo específico da modalidade 15.
+        # -----------------------------------------------------
+
+        if cod_modalidade == 15:
+            continue
+
+
+        # -----------------------------------------------------
+        # Receita da lógica antiga
+        #
+        # Pode não existir, como no caso da modalidade 12.
+        # -----------------------------------------------------
+
+        r = receita_por_modalidade.get(
+            cod_modalidade
+        )
+
+        # =====================================================
+        # MODALIDADE 10
+        # Usa a nova perda financeira validada.
+        # =====================================================
+
+        if (
+            cod_modalidade == 10
+            and perda_aperfeicoamento
+        ):
+            financeiro = perda_aperfeicoamento
+            quantidades = perda_aperfeicoamento
+
+        elif (
+            cod_modalidade == 9
+            and perda_iniciacao
+        ):
+            financeiro = perda_iniciacao
+            quantidades = perda_iniciacao
+
+        elif (
+            cod_modalidade == 11
+            and perda_qualificacao
+        ):
+            financeiro = perda_qualificacao
+            quantidades = perda_qualificacao
+
+        elif (
+            cod_modalidade == 14
+            and perda_pos_graduacao
+        ):
+            financeiro = perda_pos_graduacao
+            quantidades = perda_pos_graduacao
+
+        elif (
+            cod_modalidade == 17
+            and perda_graduacao
+        ):
+            financeiro = perda_graduacao
+            quantidades = perda_graduacao
+
+        else:
+            financeiro = r
+            quantidades = e
+
+
+        resultado.append(
+            {
+                "cod_modalidade":
+                    cod_modalidade,
+
+                "modalidade":
+                    e["modalidade_nome"],
+
+                # =============================================
+                # QUANTIDADES REAIS
+                # =============================================
+
+                "evadidos":
+                    int(
+                        quantidades["ev_total"] or 0
+                    ),
+
+                "ev_jan":
+                    int(
+                        quantidades["ev_jan"] or 0
+                    ),
+
+                "ev_fev":
+                    int(
+                        quantidades["ev_fev"] or 0
+                    ),
+
+                "ev_mar":
+                    int(
+                        quantidades["ev_mar"] or 0
+                    ),
+
+                "ev_abr":
+                    int(
+                        quantidades["ev_abr"] or 0
+                    ),
+
+                "ev_mai":
+                    int(
+                        quantidades["ev_mai"] or 0
+                    ),
+
+                "ev_jun":
+                    int(
+                        quantidades["ev_jun"] or 0
+                    ),
+
+                "ev_jul":
+                    int(
+                        quantidades["ev_jul"] or 0
+                    ),
+
+                "ev_ago":
+                    int(
+                        quantidades["ev_ago"] or 0
+                    ),
+
+                "ev_set":
+                    int(
+                        quantidades["ev_set"] or 0
+                    ),
+
+                "ev_out":
+                    int(
+                        quantidades["ev_out"] or 0
+                    ),
+
+                "ev_nov":
+                    int(
+                        quantidades["ev_nov"] or 0
+                    ),
+
+                "ev_dez":
+                    int(
+                        quantidades["ev_dez"] or 0
+                    ),
+
+                "ev_total":
+                    int(
+                        quantidades["ev_total"] or 0
+                    ),
+                
+                "ev_periodo":
+                    int(
+                        quantidades["ev_periodo"] or 0
+                    )
+                    if "ev_periodo" in quantidades
+                    else int(
+                        quantidades["ev_total"] or 0
+                    ),
+
+
+                # =============================================
+                # RECEITA
+                #
+                # Temporariamente mantém a lógica antiga.
+                # Se a modalidade não existia no SQL antigo,
+                # retorna 0.
+                # =============================================
+
+                "jan":
+                    float(financeiro["jan"] or 0)
+                    if financeiro
+                    else 0.0,
+
+                "fev":
+                    float(financeiro["fev"] or 0)
+                    if financeiro
+                    else 0.0,
+
+                "mar":
+                    float(financeiro["mar"] or 0)
+                    if financeiro
+                    else 0.0,
+
+                "abr":
+                    float(financeiro["abr"] or 0)
+                    if financeiro
+                    else 0.0,
+
+                "mai":
+                    float(financeiro["mai"] or 0)
+                    if financeiro
+                    else 0.0,
+
+                "jun":
+                    float(financeiro["jun"] or 0)
+                    if financeiro
+                    else 0.0,
+
+                "jul":
+                    float(financeiro["jul"] or 0)
+                    if financeiro
+                    else 0.0,
+
+                "ago":
+                    float(financeiro["ago"] or 0)
+                    if financeiro
+                    else 0.0,
+
+                "set":
+                    float(financeiro["set"] or 0)
+                    if financeiro
+                    else 0.0,
+
+                "out":
+                    float(financeiro["out"] or 0)
+                    if financeiro
+                    else 0.0,
+
+                "nov":
+                    float(financeiro["nov"] or 0)
+                    if financeiro
+                    else 0.0,
+
+                "dez":
+                    float(financeiro["dez"] or 0)
+                    if financeiro
+                    else 0.0,
+
+                "total":
+                    float(financeiro["total"] or 0)
+                    if financeiro
+                    else 0.0,
+            }
+        )
+
+    # Na visão consolidada, adiciona novamente
+    # a modalidade 15 usando a NOVA lógica.
+    if modalidade is None:
+
+        resultado_tecnico = (
+            await performance_evasao_tabela(
+                request=request,
+                ano=ano,
+                modalidade=15,
+                mes_inicio=mes_inicio,
+                mes_fim=mes_fim
+            )
+        )
+
+        resultado.extend(
+            resultado_tecnico
+        )
+
+    # Mantém ordem alfabética
+    resultado.sort(
+        key=lambda x: (
+            x.get("modalidade") or ""
+        )
+    )
+
+    return resultado
