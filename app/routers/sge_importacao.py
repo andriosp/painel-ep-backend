@@ -17,7 +17,10 @@ from pathlib import Path
 from pydantic import BaseModel
 from app.services.relatorio_executivo import (
     montar_preview_relatorio_executivo,
-    montar_preview_relatorio_desempenho_programa
+    montar_preview_relatorio_desempenho_programa,
+    montar_preview_relatorio_desempenho_subregiao,
+    montar_preview_relatorio_desempenho_regiao,
+    montar_preview_relatorio_indicadores_detalhados,
 )
 from fastapi.responses import StreamingResponse, FileResponse
 from app.services.pptx_carteira_programas import gerar_pptx_carteira_programas
@@ -25,7 +28,10 @@ from app.services.pptx_caravana import gerar_pptx_caravana_base
 
 from app.services.pdf_relatorio_executivo import (
     gerar_pdf_relatorio_executivo,
-    gerar_pdf_relatorio_desempenho_programa
+    gerar_pdf_relatorio_desempenho_programa,
+    gerar_pdf_relatorio_desempenho_subregiao,
+    gerar_pdf_relatorio_desempenho_regiao,
+    gerar_pdf_relatorio_indicadores_detalhados,
 )
 
 router = APIRouter()
@@ -10199,7 +10205,80 @@ async def performance_preditiva(
                 GROUP BY md.codigo
             ),
 
-            
+            -- =========================================================
+            -- META MENSAL POR MODALIDADE
+            -- =========================================================
+
+            meta_modalidade_mensal AS (
+                SELECT
+                    md.codigo AS cod_modalidade,
+                    v.mes,
+
+                    COALESCE(
+                        SUM(v.valor),
+                        0
+                    ) AS meta_mes
+
+                FROM planejamento_staging ps
+
+                JOIN modalidade md
+                    ON UPPER(
+                        TRIM(
+                            COALESCE(md.nome::text, '')
+                        )
+                    ) =
+                    UPPER(
+                        TRIM(
+                            COALESCE(ps.modalidade_raw::text, '')
+                        )
+                    )
+
+                CROSS JOIN LATERAL (
+                    VALUES
+                        (1,  COALESCE(ps.jan, 0)),
+                        (2,  COALESCE(ps.fev, 0)),
+                        (3,  COALESCE(ps.mar, 0)),
+                        (4,  COALESCE(ps.abr, 0)),
+                        (5,  COALESCE(ps.mai, 0)),
+                        (6,  COALESCE(ps.jun, 0)),
+                        (7,  COALESCE(ps.jul, 0)),
+                        (8,  COALESCE(ps.ago, 0)),
+                        (9,  COALESCE(ps.set_, 0)),
+                        (10, COALESCE(ps.out_, 0)),
+                        (11, COALESCE(ps.nov, 0)),
+                        (12, COALESCE(ps.dez, 0))
+                ) AS v(mes, valor)
+
+                WHERE ps.lote_id = (
+                    SELECT id
+                    FROM planejamento_import_lotes
+                    WHERE CAST(ano_referencia AS integer) = $1
+                      AND status_processamento = 'processado'
+                    ORDER BY id DESC
+                    LIMIT 1
+                )
+
+                AND ps.flag_valida = TRUE
+
+                AND UPPER(
+                    TRIM(
+                        COALESCE(ps.tipo::text, '')
+                    )
+                ) = 'META'
+
+                AND UPPER(
+                    TRIM(
+                        COALESCE(ps.conta::text, '')
+                    )
+                ) IN (
+                    'MATRÍCULAS',
+                    'MATRICULAS'
+                )
+
+                GROUP BY
+                    md.codigo,
+                    v.mes
+            ),
 
 
             realizado AS (
@@ -10254,6 +10333,11 @@ async def performance_preditiva(
                     0
                 ) AS meta,
 
+                COALESCE(
+                    mmm.meta_mes,
+                    0
+                ) AS meta_mes,
+
                 rl.valor AS realizado,
 
                 COALESCE(
@@ -10278,6 +10362,11 @@ async def performance_preditiva(
             LEFT JOIN meta_modalidade mm
                 ON mm.cod_modalidade =
                 me.cod_modalidade
+
+            LEFT JOIN meta_modalidade_mensal mmm
+                ON mmm.cod_modalidade =
+                me.cod_modalidade
+            AND mmm.mes = m.mes
 
             ORDER BY
                 me.nome_modalidade,
@@ -10315,6 +10404,10 @@ async def performance_preditiva(
 
             modalidades[codigo]["serie"].append({
                 "mes": int(row["mes"]),
+
+                "meta_mes": float(
+                    row["meta_mes"] or 0
+                ),
 
                 "realizado": (
                     None
@@ -11124,20 +11217,6 @@ async def performance_preditiva(
                 for registro in serie
             }
 
-            valores_reais = [
-                mapa_realizado.get(mes, 0)
-                for mes in range(
-                    1,
-                    ultimo_mes_realizado + 1
-                )
-            ]
-
-            media_realizada = (
-                sum(valores_reais) / len(valores_reais)
-                if valores_reais
-                else 0
-            )
-
             meta_anual_modalidade = NumberOrZero(
                 item.get("meta")
             )
@@ -11173,9 +11252,9 @@ async def performance_preditiva(
                     else None
                 )
 
-                projetado_banco = (
+                meta_mes = (
                     NumberOrZero(
-                        registro["projetado"]
+                        registro["meta_mes"]
                     )
                     if registro
                     else 0
@@ -11193,16 +11272,11 @@ async def performance_preditiva(
 
                 # -------------------------------------------------
                 # MESES FUTUROS
+                # Utilizam diretamente a META MENSAL
+                # da modalidade.
                 # -------------------------------------------------
                 else:
-                    if projetado_banco > 0:
-                        valor = projetado_banco
-
-                    elif media_realizada > 0:
-                        valor = round(media_realizada)
-
-                    else:
-                        valor = 0
+                    valor = meta_mes
 
                     tipo = (
                         "projecao"
@@ -12638,7 +12712,33 @@ async def performance_preditiva(
             else:
                 realizado.append(None)
 
-        previsao = calcular_previsao(serie)
+        # =========================================================
+        # PREVISÃO
+        # =========================================================
+
+        if indicador == "matriculas":
+
+            # Para Matrículas:
+            # - meses realizados permanecem sem previsão;
+            # - meses futuros passam a utilizar diretamente
+            #   a META MENSAL cadastrada no planejamento.
+            previsao = []
+
+            for r in serie:
+
+                if r["mes"] in ids_meses:
+                    previsao.append(None)
+
+                else:
+                    previsao.append(
+                        round(r["meta"], 2)
+                    )
+
+        else:
+
+            # Hora-Aluno e Receita mantêm
+            # a lógica de previsão existente.
+            previsao = calcular_previsao(serie)
 
         return {
             "meta": meta,
@@ -21011,6 +21111,88 @@ async def gerar_relatorio(
                 "orientacao": payload.orientacao,
                 "preview": preview
             }
+        
+        if payload.tipo == "subregiao":
+            preview = await montar_preview_relatorio_desempenho_subregiao(
+                conn,
+                payload.filtros,
+                payload.opcoes
+            )
+
+            return {
+                "ok": True,
+                "tipo": payload.tipo,
+                "formato": payload.formato,
+                "orientacao": payload.orientacao,
+                "preview": preview
+            }
+        
+        if payload.tipo == "regiao":
+
+            preview = await montar_preview_relatorio_desempenho_regiao(
+                conn,
+                payload.filtros,
+                payload.opcoes
+            )
+
+
+            # ==================================================
+            # DADOS PREDITIVOS DA REGIÃO
+            # ==================================================
+
+            meses_lista = (
+                payload.filtros.meses
+                or []
+            )
+
+            meses_txt = (
+                ",".join(
+                    str(mes)
+                    for mes in meses_lista
+                )
+                if meses_lista
+                else None
+            )
+
+
+            preditivo = await performance_preditiva(
+                request=request,
+                ano=payload.filtros.ano,
+                meses=meses_txt,
+                subregioes=None,
+                programas=None,
+                regiao=payload.filtros.regiao
+            )
+
+
+            preview["preditivo"] = (
+                preditivo
+            )
+
+
+            return {
+                "ok": True,
+                "tipo": payload.tipo,
+                "formato": payload.formato,
+                "orientacao": payload.orientacao,
+                "preview": preview
+            }
+        
+        if payload.tipo == "indicadores_detalhados":
+
+            preview = await montar_preview_relatorio_indicadores_detalhados(
+                conn,
+                payload.filtros,
+                payload.opcoes
+            )
+
+            return {
+                "ok": True,
+                "tipo": payload.tipo,
+                "formato": payload.formato,
+                "orientacao": payload.orientacao,
+                "preview": preview
+            }
 
     raise HTTPException(
         status_code=400,
@@ -21146,6 +21328,305 @@ async def gerar_relatorio_pdf(
 
             nome_arquivo = (
                 f"RelatorioDesempenhoPrograma_"
+                f"{ano}_{periodo}.pdf"
+            )
+
+            return StreamingResponse(
+                pdf,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition":
+                    f'inline; filename="{nome_arquivo}"'
+                }
+            )
+        
+        if payload.tipo == "subregiao":
+
+            preview = await montar_preview_relatorio_desempenho_subregiao(
+                conn,
+                payload.filtros,
+                payload.opcoes
+            )
+
+            # ======================================================
+            # DADOS PREDITIVOS
+            # Reaproveita exatamente as mesmas regras da
+            # página Análise Preditiva
+            # ======================================================
+
+            ano_preditivo = payload.filtros.ano
+
+            meses_preditivos = (
+                payload.filtros.meses
+                or list(range(1, 13))
+            )
+
+            meses_txt = ",".join(
+                str(mes)
+                for mes in meses_preditivos
+            )
+
+
+            # ------------------------------------------------------
+            # Resolve o código da sub-região selecionada
+            # A Análise Preditiva trabalha com o código,
+            # enquanto o relatório recebe o nome.
+            # ------------------------------------------------------
+
+            subregioes_txt = None
+
+            if payload.filtros.subregiao:
+
+                row_subregiao = await conn.fetchrow(
+                    """
+                    SELECT codigo
+                    FROM subregioes
+                    WHERE UPPER(TRIM(nome)) =
+                          UPPER(TRIM($1))
+                    LIMIT 1
+                    """,
+                    payload.filtros.subregiao
+                )
+
+                if row_subregiao:
+                    subregioes_txt = str(
+                        row_subregiao["codigo"]
+                    )
+
+
+            # ------------------------------------------------------
+            # Usa a MESMA função da Análise Preditiva
+            # ------------------------------------------------------
+
+            dados_preditivos = await performance_preditiva(
+                request=request,
+                ano=ano_preditivo,
+                meses=meses_txt,
+                subregioes=subregioes_txt,
+                programas=None,
+                regiao=payload.filtros.regiao
+            )
+
+
+            # Disponibiliza tudo para o gerador do PDF
+            preview["preditivo"] = dados_preditivos
+
+
+            pdf = gerar_pdf_relatorio_desempenho_subregiao(
+                preview,
+                payload.orientacao
+            )
+
+            ano = payload.filtros.ano or "ano"
+            meses = payload.filtros.meses or []
+
+            nomes_meses = {
+                1: "Jan",
+                2: "Fev",
+                3: "Mar",
+                4: "Abr",
+                5: "Mai",
+                6: "Jun",
+                7: "Jul",
+                8: "Ago",
+                9: "Set",
+                10: "Out",
+                11: "Nov",
+                12: "Dez",
+            }
+
+            if not meses:
+
+                periodo = "Anual"
+
+            elif len(meses) == 1:
+
+                periodo = nomes_meses.get(
+                    meses[0],
+                    str(meses[0])
+                )
+
+            else:
+
+                meses_ordenados = sorted(meses)
+
+                periodo = (
+                    f"{nomes_meses.get(meses_ordenados[0], meses_ordenados[0])}-"
+                    f"{nomes_meses.get(meses_ordenados[-1], meses_ordenados[-1])}"
+                )
+
+            nome_arquivo = (
+                f"RelatorioDesempenhoSubregiao_"
+                f"{ano}_{periodo}.pdf"
+            )
+
+            return StreamingResponse(
+                pdf,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition":
+                    f'inline; filename="{nome_arquivo}"'
+                }
+            )
+        
+        if payload.tipo == "regiao":
+
+            preview = await montar_preview_relatorio_desempenho_regiao(
+                conn,
+                payload.filtros,
+                payload.opcoes
+            )
+
+            # ==================================================
+            # DADOS PREDITIVOS DA REGIÃO
+            # ==================================================
+
+            meses_lista = (
+                payload.filtros.meses
+                or []
+            )
+
+            meses_txt = (
+                ",".join(
+                    str(mes)
+                    for mes in meses_lista
+                )
+                if meses_lista
+                else None
+            )
+
+
+            preditivo = await performance_preditiva(
+                request=request,
+                ano=payload.filtros.ano,
+                meses=meses_txt,
+                subregioes=None,
+                programas=None,
+                regiao=payload.filtros.regiao
+            )
+
+
+            preview["preditivo"] = (
+                preditivo
+            )
+
+
+            # ==================================================
+            # GERA O PDF
+            # ==================================================
+
+            pdf = gerar_pdf_relatorio_desempenho_regiao(
+                preview,
+                payload.orientacao
+            )
+
+            ano = payload.filtros.ano or "ano"
+            meses = payload.filtros.meses or []
+
+            nomes_meses = {
+                1: "Jan",
+                2: "Fev",
+                3: "Mar",
+                4: "Abr",
+                5: "Mai",
+                6: "Jun",
+                7: "Jul",
+                8: "Ago",
+                9: "Set",
+                10: "Out",
+                11: "Nov",
+                12: "Dez",
+            }
+
+            if not meses:
+
+                periodo = "Anual"
+
+            elif len(meses) == 1:
+
+                periodo = nomes_meses.get(
+                    meses[0],
+                    str(meses[0])
+                )
+
+            else:
+
+                meses_ordenados = sorted(
+                    meses
+                )
+
+                periodo = (
+                    f"{nomes_meses.get(meses_ordenados[0], meses_ordenados[0])}-"
+                    f"{nomes_meses.get(meses_ordenados[-1], meses_ordenados[-1])}"
+                )
+
+            nome_arquivo = (
+                f"RelatorioDesempenhoRegiao_"
+                f"{ano}_{periodo}.pdf"
+            )
+
+            return StreamingResponse(
+                pdf,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition":
+                    f'inline; filename="{nome_arquivo}"'
+                }
+            )
+        
+        if payload.tipo == "indicadores_detalhados":
+
+            preview = await montar_preview_relatorio_indicadores_detalhados(
+                conn,
+                payload.filtros,
+                payload.opcoes
+            )
+
+            pdf = gerar_pdf_relatorio_indicadores_detalhados(
+                preview,
+                payload.orientacao
+            )
+
+            ano = payload.filtros.ano or "ano"
+            meses = payload.filtros.meses or []
+
+            nomes_meses = {
+                1: "Jan",
+                2: "Fev",
+                3: "Mar",
+                4: "Abr",
+                5: "Mai",
+                6: "Jun",
+                7: "Jul",
+                8: "Ago",
+                9: "Set",
+                10: "Out",
+                11: "Nov",
+                12: "Dez",
+            }
+
+            if not meses:
+
+                periodo = "Anual"
+
+            elif len(meses) == 1:
+
+                periodo = nomes_meses.get(
+                    meses[0],
+                    str(meses[0])
+                )
+
+            else:
+
+                meses_ordenados = sorted(meses)
+
+                periodo = (
+                    f"{nomes_meses.get(meses_ordenados[0], meses_ordenados[0])}-"
+                    f"{nomes_meses.get(meses_ordenados[-1], meses_ordenados[-1])}"
+                )
+
+            nome_arquivo = (
+                f"RelatorioIndicadoresDetalhados_"
                 f"{ano}_{periodo}.pdf"
             )
 

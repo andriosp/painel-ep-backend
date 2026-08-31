@@ -2241,6 +2241,179 @@ async def montar_preview_relatorio_executivo(conn, filtros, opcoes):
         }
     }
 
+async def montar_preview_relatorio_indicadores_detalhados(
+    conn,
+    filtros,
+    opcoes
+):
+    # ======================================================
+    # BASE DO RELATÓRIO
+    # ======================================================
+
+    preview = await montar_preview_relatorio_executivo(
+        conn,
+        filtros,
+        opcoes
+    )
+
+
+    # ======================================================
+    # KPIs
+    # ======================================================
+
+    kpis = preview.get(
+        "kpis",
+        {}
+    )
+
+    matriculas = kpis.get(
+        "matriculas",
+        {}
+    )
+
+    hora_aluno = kpis.get(
+        "hora_aluno",
+        {}
+    )
+
+    receita = kpis.get(
+        "receita",
+        {}
+    )
+
+
+    # ======================================================
+    # FUNÇÃO AUXILIAR
+    # ======================================================
+
+    def montar_indicador(
+        realizado,
+        meta
+    ):
+        realizado = float(
+            realizado or 0
+        )
+
+        meta = float(
+            meta or 0
+        )
+
+        if meta > 0:
+
+            percentual = (
+                realizado / meta
+            ) * 100
+
+            gap = (
+                meta - realizado
+            )
+
+        else:
+
+            percentual = None
+            gap = None
+
+
+        return {
+            "realizado": realizado,
+            "meta": meta,
+            "percentual": percentual,
+            "gap": gap,
+        }
+
+
+    # ======================================================
+    # VISÃO GERAL DOS INDICADORES
+    # ======================================================
+
+    preview[
+        "indicadores_detalhados"
+    ] = {
+
+        "matriculas": montar_indicador(
+            matriculas.get(
+                "realizado",
+                0
+            ),
+            matriculas.get(
+                "meta",
+                0
+            )
+        ),
+
+        "hora_aluno": montar_indicador(
+            hora_aluno.get(
+                "realizado",
+                0
+            ),
+            hora_aluno.get(
+                "meta",
+                0
+            )
+        ),
+
+        "receita": montar_indicador(
+            receita.get(
+                "realizado",
+                0
+            ),
+            receita.get(
+                "meta",
+                0
+            )
+        ),
+    }
+
+
+    # ======================================================
+    # IDENTIFICAÇÃO DOS FILTROS
+    # ======================================================
+
+    preview[
+        "cabecalho_indicadores_detalhados"
+    ] = {
+
+        "ano": filtros.ano,
+
+        "meses": (
+            filtros.meses
+            or []
+        ),
+
+        "regiao": getattr(
+            filtros,
+            "regiao",
+            None
+        ),
+
+        "subregiao": getattr(
+            filtros,
+            "subregiao",
+            None
+        ),
+
+        "uo": getattr(
+            filtros,
+            "uo",
+            None
+        ),
+
+        "programa": getattr(
+            filtros,
+            "programa",
+            None
+        ),
+
+        "modalidade": getattr(
+            filtros,
+            "modalidade",
+            None
+        ),
+    }
+
+
+    return preview
+
 async def montar_preview_relatorio_desempenho_programa(
     conn,
     filtros,
@@ -2768,5 +2941,422 @@ async def montar_preview_relatorio_desempenho_programa(
         for nome_subregiao, programas_subregiao
         in subregioes_detalhadas.items()
     ]
+
+    return preview
+
+async def montar_preview_relatorio_desempenho_subregiao(
+    conn,
+    filtros,
+    opcoes
+):
+    # ======================================================
+    # BASE DO RELATÓRIO
+    # ======================================================
+
+    preview = await montar_preview_relatorio_executivo(
+        conn,
+        filtros,
+        opcoes
+    )
+
+
+    # ======================================================
+    # CABEÇALHO TERRITORIAL
+    # ======================================================
+
+    sql_cabecalho = """
+        SELECT
+            r.nome AS regiao,
+            s.nome AS subregiao,
+            u.nome AS uo,
+            u.geope AS geope
+
+        FROM uo u
+
+        LEFT JOIN subregioes s
+            ON s.codigo = u.cod_subregiao
+
+        LEFT JOIN regioes r
+            ON r.codigo = s.codigo_regiao
+
+        WHERE u.nome IS NOT NULL
+          AND TRIM(u.nome) <> ''
+
+          AND (
+                $1::text IS NULL
+                OR UPPER(TRIM(r.nome))
+                    = UPPER(TRIM($1))
+          )
+
+          AND (
+                $2::text IS NULL
+                OR UPPER(TRIM(s.nome))
+                    = UPPER(TRIM($2))
+          )
+
+        ORDER BY
+            r.nome,
+            s.nome,
+            u.nome
+    """
+
+
+    rows_cabecalho = await conn.fetch(
+        sql_cabecalho,
+        filtros.regiao,
+        filtros.subregiao
+    )
+
+
+    # ======================================================
+    # CONSOLIDA REGIÕES, SUB-REGIÕES, GEOPE E UOs
+    # ======================================================
+
+    regioes = []
+    subregioes = []
+    geopess = []
+    uos = []
+
+    for row in rows_cabecalho:
+
+        nome_regiao = row["regiao"]
+        nome_subregiao = row["subregiao"]
+        nome_geope = row["geope"]
+        nome_uo = row["uo"]
+
+        if (
+            nome_regiao
+            and nome_regiao not in regioes
+        ):
+            regioes.append(nome_regiao)
+
+        if (
+            nome_subregiao
+            and nome_subregiao not in subregioes
+        ):
+            subregioes.append(nome_subregiao)
+
+        if (
+            nome_geope
+            and nome_geope not in geopess
+        ):
+            geopess.append(nome_geope)
+
+        if (
+            nome_uo
+            and nome_uo not in uos
+        ):
+            uos.append(nome_uo)
+
+
+    # ======================================================
+    # ORDENAÇÕES
+    # ======================================================
+
+    regioes = sorted(
+        regioes,
+        key=lambda x: str(x).casefold()
+    )
+
+    subregioes = sorted(
+        subregioes,
+        key=lambda x: str(x).casefold()
+    )
+
+    geopess = sorted(
+        geopess,
+        key=lambda x: str(x).casefold()
+    )
+
+    uos = sorted(
+        [
+            str(nome).strip().upper()
+            for nome in uos
+            if nome
+        ],
+        key=lambda x: x.casefold()
+    )
+
+
+    # ======================================================
+    # CABEÇALHO DO RELATÓRIO
+    # ======================================================
+
+    preview["cabecalho_desempenho_subregiao"] = {
+
+        "regiao": (
+            filtros.regiao
+            if filtros.regiao
+            else (
+                regioes[0]
+                if filtros.subregiao and len(regioes) == 1
+                else "TODAS AS REGIÕES"
+            )
+        ),
+
+        "subregiao": (
+            filtros.subregiao
+            if filtros.subregiao
+            else "TODAS AS SUB-REGIÕES"
+        ),
+
+        "regioes": regioes,
+
+        "subregioes": subregioes,
+
+        "geope": (
+            ", ".join(geopess)
+            if geopess
+            else None
+        ),
+
+        "uos": uos
+    }
+
+
+    # ======================================================
+    # MODO DO RELATÓRIO
+    # ======================================================
+
+    if filtros.subregiao:
+
+        preview["modo_desempenho_subregiao"] = (
+            "subregiao_unica"
+        )
+
+    elif filtros.regiao:
+
+        preview["modo_desempenho_subregiao"] = (
+            "subregioes_da_regiao"
+        )
+
+    else:
+
+        preview["modo_desempenho_subregiao"] = (
+            "todas_subregioes"
+        )
+
+
+    return preview
+
+async def montar_preview_relatorio_desempenho_regiao(
+    conn,
+    filtros,
+    opcoes
+):
+    # ======================================================
+    # BASE DO RELATÓRIO
+    # ======================================================
+
+    # Reaproveita toda a apuração já existente:
+    # KPIs, metas, período, evolução etc.
+    preview = await montar_preview_relatorio_executivo(
+        conn,
+        filtros,
+        opcoes
+    )
+
+
+    # ======================================================
+    # VALIDAÇÃO
+    # ======================================================
+
+    if not filtros.regiao:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Selecione uma região para gerar "
+                "o Relatório de Desempenho por Região."
+            )
+        )
+
+
+    # ======================================================
+    # ESTRUTURA TERRITORIAL DA REGIÃO
+    # ======================================================
+
+    sql_territorio = """
+        SELECT
+            r.nome AS regiao,
+            s.nome AS subregiao,
+            u.nome AS uo,
+            u.geope AS geope
+
+        FROM uo u
+
+        LEFT JOIN subregioes s
+            ON s.codigo = u.cod_subregiao
+
+        LEFT JOIN regioes r
+            ON r.codigo = s.codigo_regiao
+
+        WHERE u.nome IS NOT NULL
+          AND TRIM(u.nome) <> ''
+
+          AND UPPER(TRIM(r.nome))
+              = UPPER(TRIM($1))
+
+        ORDER BY
+            s.nome,
+            u.nome
+    """
+
+
+    rows_territorio = await conn.fetch(
+        sql_territorio,
+        filtros.regiao
+    )
+
+
+    # ======================================================
+    # CONSOLIDA SUB-REGIÕES, GEOPEs E UOs
+    # ======================================================
+
+    subregioes = []
+    geopess = []
+    uos = []
+
+    for row in rows_territorio:
+
+        nome_subregiao = row["subregiao"]
+        nome_geope = row["geope"]
+        nome_uo = row["uo"]
+
+        if (
+            nome_subregiao
+            and nome_subregiao not in subregioes
+        ):
+            subregioes.append(
+                nome_subregiao
+            )
+
+        if (
+            nome_geope
+            and nome_geope not in geopess
+        ):
+            geopess.append(
+                nome_geope
+            )
+
+        if (
+            nome_uo
+            and nome_uo not in uos
+        ):
+            uos.append(
+                nome_uo
+            )
+
+
+    # ======================================================
+    # ORDENAÇÕES
+    # ======================================================
+
+    subregioes = sorted(
+        [
+            str(nome).strip()
+            for nome in subregioes
+            if nome
+        ],
+        key=lambda x: x.casefold()
+    )
+
+    geopess = sorted(
+        [
+            str(nome).strip()
+            for nome in geopess
+            if nome
+        ],
+        key=lambda x: x.casefold()
+    )
+
+    uos = sorted(
+        [
+            str(nome).strip().upper()
+            for nome in uos
+            if nome
+        ],
+        key=lambda x: x.casefold()
+    )
+
+
+    # ======================================================
+    # CABEÇALHO DO RELATÓRIO
+    # ======================================================
+
+    preview["cabecalho_desempenho_regiao"] = {
+        "regiao": filtros.regiao,
+
+        "subregioes": subregioes,
+
+        "geope": (
+            ", ".join(geopess)
+            if geopess
+            else None
+        ),
+
+        "uos": uos,
+
+        "quantidade_subregioes": len(
+            subregioes
+        ),
+
+        "quantidade_uos": len(
+            uos
+        ),
+    }
+
+
+    # ======================================================
+    # IDENTIFICA O TIPO DE PREVIEW
+    # ======================================================
+
+    preview["modo_desempenho_regiao"] = (
+        "regiao_unica"
+    )
+
+    # ======================================================
+    # CONTEXTO DO PERÍODO
+    # ======================================================
+
+    meses = sorted(
+        filtros.meses or []
+    )
+
+    nomes_meses = {
+        1: "Jan",
+        2: "Fev",
+        3: "Mar",
+        4: "Abr",
+        5: "Mai",
+        6: "Jun",
+        7: "Jul",
+        8: "Ago",
+        9: "Set",
+        10: "Out",
+        11: "Nov",
+        12: "Dez",
+    }
+
+    if not meses:
+        periodo = "Anual"
+
+    elif len(meses) == 1:
+        periodo = nomes_meses.get(
+            meses[0],
+            str(meses[0])
+        )
+
+    else:
+        periodo = (
+            f"{nomes_meses.get(meses[0], meses[0])}-"
+            f"{nomes_meses.get(meses[-1], meses[-1])}"
+        )
+
+
+    preview["contexto_desempenho_regiao"] = {
+        "ano": filtros.ano,
+        "meses": meses,
+        "periodo": periodo,
+    }
 
     return preview
