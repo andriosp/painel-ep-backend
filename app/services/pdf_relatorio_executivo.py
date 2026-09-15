@@ -14634,3 +14634,1802 @@ def gerar_pdf_relatorio_indicadores_detalhados(
     buffer.seek(0)
 
     return buffer
+
+def gerar_pdf_relatorio_turmas_detalhadas(
+    preview,
+    orientacao="paisagem"
+):
+    buffer = BytesIO()
+
+    paisagem = orientacao == "paisagem"
+
+    if paisagem:
+        largura, altura = landscape(A4)
+    else:
+        largura, altura = A4
+
+    pdf = canvas.Canvas(
+        buffer,
+        pagesize=(largura, altura)
+    )
+
+    # =========================================================
+    # DADOS
+    # =========================================================
+
+    dados = preview.get(
+        "turmas_detalhadas",
+        {}
+    )
+
+    visao_geral = dados.get(
+        "visao_geral",
+        {}
+    )
+
+    resumo = dados.get(
+        "resumo",
+        {}
+    )
+
+    ocupacao_preenchimento = dados.get(
+        "ocupacao_preenchimento",
+        {}
+    )
+
+    faixas_preenchimento = ocupacao_preenchimento.get(
+        "faixas",
+        {}
+    )
+
+    maior_preenchimento = ocupacao_preenchimento.get(
+        "maior_preenchimento",
+        []
+    )
+
+    menor_preenchimento = ocupacao_preenchimento.get(
+        "menor_preenchimento",
+        []
+    )
+
+    modalidade_programa = dados.get(
+        "modalidade_programa",
+        {}
+    )
+
+    modalidades_resumo = modalidade_programa.get(
+        "modalidades",
+        []
+    )
+
+    programas_resumo = modalidade_programa.get(
+        "programas",
+        []
+    )
+
+    cabecalho = preview.get(
+        "cabecalho_turmas_detalhadas",
+        {}
+    )
+
+    ano = cabecalho.get(
+        "ano",
+        preview.get("ano")
+    )
+
+    meses = cabecalho.get(
+        "meses",
+        preview.get("meses", [])
+    )
+
+    periodo = _periodo(meses)
+
+    # =========================================================
+    # CORES
+    # =========================================================
+
+    azul_escuro = colors.HexColor("#071b52")
+    azul = colors.HexColor("#2563eb")
+    azul_claro = colors.HexColor("#eff6ff")
+
+    cinza_texto = colors.HexColor("#64748b")
+    cinza_borda = colors.HexColor("#e5e7eb")
+    cinza_fundo = colors.HexColor("#f8fafc")
+
+    verde = colors.HexColor("#16a34a")
+
+    # =========================================================
+    # CABEÇALHO
+    # =========================================================
+
+    pdf.setFillColor(azul_escuro)
+
+    pdf.rect(
+        0,
+        altura - 100,
+        largura,
+        100,
+        fill=True,
+        stroke=False
+    )
+
+    pdf.setFillColor(colors.white)
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        18
+    )
+
+    pdf.drawString(
+        40,
+        altura - 42,
+        "Turmas Detalhadas"
+    )
+
+    pdf.setFont(
+        "Helvetica",
+        9
+    )
+
+    pdf.drawString(
+        40,
+        altura - 61,
+        f"Visão Geral das Turmas | {ano} | {periodo}"
+    )
+
+    # =========================================================
+    # CONTEXTO DOS FILTROS — DUAS LINHAS
+    # =========================================================
+
+    contexto_linha_1 = []
+    contexto_linha_2 = []
+
+    if cabecalho.get("regiao"):
+        contexto_linha_1.append(
+            f"Região: {cabecalho['regiao']}"
+        )
+
+    if cabecalho.get("subregiao"):
+        contexto_linha_1.append(
+            f"Sub-região: {cabecalho['subregiao']}"
+        )
+
+    if cabecalho.get("uo"):
+        contexto_linha_2.append(
+            f"UO: {cabecalho['uo']}"
+        )
+
+    if cabecalho.get("programa"):
+        contexto_linha_2.append(
+            f"Programa: {cabecalho['programa']}"
+        )
+
+    if cabecalho.get("modalidade"):
+        contexto_linha_2.append(
+            f"Modalidade: {cabecalho['modalidade']}"
+        )
+
+
+    pdf.setFont(
+        "Helvetica",
+        7.5
+    )
+
+    if contexto_linha_1:
+
+        pdf.drawString(
+            40,
+            altura - 76,
+            " • ".join(contexto_linha_1)
+        )
+
+    if contexto_linha_2:
+
+        pdf.drawString(
+            40,
+            altura - 90,
+            " • ".join(contexto_linha_2)
+        )
+
+    _desenhar_logo_cabecalho(
+        pdf,
+        largura,
+        altura,
+        paisagem=paisagem
+    )
+
+    # =========================================================
+    # TÍTULO DA PÁGINA
+    # =========================================================
+
+    y = altura - 135
+
+    pdf.setFillColor(
+        azul_escuro
+    )
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        15
+    )
+
+    pdf.drawString(
+        40,
+        y,
+        "Visão Geral das Turmas"
+    )
+
+    pdf.setFillColor(
+        cinza_texto
+    )
+
+    pdf.setFont(
+        "Helvetica",
+        8.5
+    )
+
+    pdf.drawString(
+        40,
+        y - 17,
+        "Panorama da oferta, capacidade e ocupação das turmas no período selecionado."
+    )
+
+    # =========================================================
+    # CARDS PRINCIPAIS
+    # =========================================================
+
+    cards = visao_geral.get(
+        "cards",
+        []
+    )
+
+    # Segurança caso o preview ainda não tenha o bloco
+    if not cards:
+        cards = [
+            {
+                "titulo": "Total de Turmas",
+                "valor": resumo.get(
+                    "total_turmas",
+                    0
+                ),
+                "tipo": "numero",
+            },
+            {
+                "titulo": "Vagas",
+                "valor": resumo.get(
+                    "total_vagas",
+                    0
+                ),
+                "tipo": "numero",
+            },
+            {
+                "titulo": "Ocupados",
+                "valor": resumo.get(
+                    "ocupados",
+                    0
+                ),
+                "tipo": "numero",
+            },
+            {
+                "titulo": "Taxa de Preenchimento",
+                "valor": resumo.get(
+                    "taxa_preenchimento",
+                    0
+                ),
+                "tipo": "percentual",
+            },
+        ]
+
+    margem = 40
+    gap = 12
+
+    largura_util = (
+        largura
+        - margem * 2
+    )
+
+    card_w = (
+        largura_util
+        - gap * 3
+    ) / 4
+
+    card_h = 95
+
+    y_cards = y - 135
+
+    for i, card in enumerate(cards[:4]):
+
+        x_card = (
+            margem
+            + i * (card_w + gap)
+        )
+
+        valor = card.get(
+            "valor",
+            0
+        )
+
+        tipo = card.get(
+            "tipo",
+            "numero"
+        )
+
+        if tipo == "percentual":
+            valor_formatado = _pct(valor)
+        else:
+            valor_formatado = _num(valor)
+
+        detalhe = ""
+
+        titulo = card.get(
+            "titulo",
+            ""
+        )
+
+        titulo_exibicao = titulo
+
+        if titulo == "Taxa de Preenchimento":
+            titulo_exibicao = "Preenchimento"
+
+        if titulo == "Total de Turmas":
+            detalhe = "Turmas no período"
+
+        elif titulo == "Vagas":
+            detalhe = "Capacidade total"
+
+        elif titulo == "Ocupados":
+            detalhe = "Matriculados +"
+
+        elif titulo == "Taxa de Preenchimento":
+            detalhe = "Ocupados / vagas"
+
+        cor_barra = azul
+
+        if titulo == "Taxa de Preenchimento":
+
+            if float(valor or 0) >= 80:
+                cor_barra = verde
+
+            elif float(valor or 0) >= 60:
+                cor_barra = azul
+
+            else:
+                cor_barra = colors.HexColor(
+                    "#f59e0b"
+                )
+
+        _card(
+            pdf,
+            x_card,
+            y_cards,
+            card_w,
+            card_h,
+            titulo_exibicao,
+            valor_formatado,
+            detalhe,
+            cor_barra
+        )
+
+        # Segunda linha do detalhe do card Ocupados
+        if titulo == "Ocupados":
+
+            pdf.setFillColor(
+                cinza_texto
+            )
+
+            pdf.setFont(
+                "Helvetica",
+                6.5
+            )
+
+            pdf.drawString(
+                x_card + 14,
+                y_cards + 13,
+                "pré-matriculados"
+            )
+
+    # =========================================================
+    # MOVIMENTAÇÃO DAS MATRÍCULAS
+    # =========================================================
+
+    movimentacao = visao_geral.get(
+        "movimentacao",
+        {}
+    )
+
+    if not movimentacao:
+        movimentacao = {
+            "matriculados": resumo.get(
+                "matriculados",
+                0
+            ),
+            "pre_matriculados": resumo.get(
+                "pre_matriculados",
+                0
+            ),
+            "cancelados": resumo.get(
+                "cancelados",
+                0
+            ),
+            "desistentes": resumo.get(
+                "desistentes",
+                0
+            ),
+            "evadidos": resumo.get(
+                "evadidos",
+                0
+            ),
+        }
+
+    box_x = margem
+    box_y = 75
+    box_w = largura_util
+    box_h = 155
+
+    pdf.setFillColor(
+        cinza_fundo
+    )
+
+    pdf.setStrokeColor(
+        cinza_borda
+    )
+
+    pdf.roundRect(
+        box_x,
+        box_y,
+        box_w,
+        box_h,
+        12,
+        fill=True,
+        stroke=True
+    )
+
+    # Barra superior
+    pdf.setFillColor(
+        azul
+    )
+
+    pdf.roundRect(
+        box_x,
+        box_y + box_h - 5,
+        box_w,
+        5,
+        3,
+        fill=True,
+        stroke=False
+    )
+
+    # Título
+    pdf.setFillColor(
+        azul_escuro
+    )
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        11
+    )
+
+    pdf.drawString(
+        box_x + 16,
+        box_y + box_h - 28,
+        "Movimentação das Matrículas"
+    )
+
+    pdf.setFillColor(
+        cinza_texto
+    )
+
+    pdf.setFont(
+        "Helvetica",
+        7.5
+    )
+
+    pdf.drawString(
+        box_x + 16,
+        box_y + box_h - 42,
+        "Distribuição dos estudantes conforme a situação registrada nas turmas."
+    )
+
+    itens = [
+        (
+            "Matriculados",
+            movimentacao.get(
+                "matriculados",
+                0
+            )
+        ),
+        (
+            "Pré-matriculados",
+            movimentacao.get(
+                "pre_matriculados",
+                0
+            )
+        ),
+        (
+            "Cancelados",
+            movimentacao.get(
+                "cancelados",
+                0
+            )
+        ),
+        (
+            "Desistentes",
+            movimentacao.get(
+                "desistentes",
+                0
+            )
+        ),
+        (
+            "Evadidos",
+            movimentacao.get(
+                "evadidos",
+                0
+            )
+        ),
+    ]
+
+    largura_item = (
+        box_w - 32
+    ) / len(itens)
+
+    y_item = (
+        box_y
+        + 47
+    )
+
+    for i, (
+        titulo_item,
+        valor_item
+    ) in enumerate(itens):
+
+        x_item = (
+            box_x
+            + 16
+            + i * largura_item
+        )
+
+        # Separador vertical
+        if i > 0:
+
+            pdf.setStrokeColor(
+                cinza_borda
+            )
+
+            pdf.line(
+                x_item,
+                box_y + 28,
+                x_item,
+                box_y + 88
+            )
+
+        pdf.setFillColor(
+            cinza_texto
+        )
+
+        pdf.setFont(
+            "Helvetica-Bold",
+            7.5
+        )
+
+        pdf.drawCentredString(
+            x_item + largura_item / 2,
+            y_item + 34,
+            titulo_item.upper()
+        )
+
+        pdf.setFillColor(
+            azul_escuro
+        )
+
+        pdf.setFont(
+            "Helvetica-Bold",
+            17
+        )
+
+        pdf.drawCentredString(
+            x_item + largura_item / 2,
+            y_item + 8,
+            _num(valor_item)
+        )
+
+    # =========================================================
+    # RODAPÉ
+    # =========================================================
+
+    pdf.setFillColor(
+        colors.HexColor("#94a3b8")
+    )
+
+    pdf.setFont(
+        "Helvetica",
+        6.5
+    )
+
+    pdf.drawString(
+        40,
+        28,
+        "Fonte: Painel Educação Profissional SENAI-RS"
+    )
+
+    pdf.drawRightString(
+        largura - 40,
+        28,
+        "Página 1"
+    )
+
+    pdf.showPage()
+
+    # =========================================================
+    # PÁGINA 2 — OCUPAÇÃO E PREENCHIMENTO
+    # =========================================================
+
+    # ---------------------------------------------------------
+    # CABEÇALHO
+    # ---------------------------------------------------------
+
+    pdf.setFillColor(azul_escuro)
+
+    pdf.rect(
+        0,
+        altura - 100,
+        largura,
+        100,
+        fill=True,
+        stroke=False
+    )
+
+    pdf.setFillColor(colors.white)
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        18
+    )
+
+    pdf.drawString(
+        40,
+        altura - 42,
+        "Turmas Detalhadas"
+    )
+
+    pdf.setFont(
+        "Helvetica",
+        9
+    )
+
+    pdf.drawString(
+        40,
+        altura - 61,
+        f"Ocupação e Preenchimento | {ano} | {periodo}"
+    )
+
+    pdf.setFont(
+        "Helvetica",
+        7.5
+    )
+
+    if contexto_linha_1:
+
+        pdf.drawString(
+            40,
+            altura - 76,
+            " • ".join(contexto_linha_1)
+        )
+
+    if contexto_linha_2:
+
+        pdf.drawString(
+            40,
+            altura - 90,
+            " • ".join(contexto_linha_2)
+        )
+
+    _desenhar_logo_cabecalho(
+        pdf,
+        largura,
+        altura,
+        paisagem=paisagem
+    )
+
+
+    # =========================================================
+    # TÍTULO DA PÁGINA
+    # =========================================================
+
+    y = altura - 135
+
+    pdf.setFillColor(
+        azul_escuro
+    )
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        15
+    )
+
+    pdf.drawString(
+        40,
+        y,
+        "Ocupação e Preenchimento"
+    )
+
+    pdf.setFillColor(
+        cinza_texto
+    )
+
+    pdf.setFont(
+        "Helvetica",
+        8.5
+    )
+
+    pdf.drawString(
+        40,
+        y - 17,
+        "Distribuição das turmas por faixa de ocupação e identificação dos maiores e menores níveis de preenchimento."
+    )
+
+
+    # =========================================================
+    # FAIXAS DE PREENCHIMENTO
+    # =========================================================
+
+    y_faixas = y - 65
+
+    pdf.setFillColor(
+        azul_escuro
+    )
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        10
+    )
+
+    pdf.drawString(
+        40,
+        y_faixas,
+        "Distribuição por Faixa de Preenchimento"
+    )
+
+    faixas = [
+        (
+            "Sem ocupação",
+            faixas_preenchimento.get(
+                "sem_ocupacao",
+                0
+            ),
+            colors.HexColor("#94a3b8")
+        ),
+        (
+            "Até 50%",
+            faixas_preenchimento.get(
+                "ate_50",
+                0
+            ),
+            colors.HexColor("#ef4444")
+        ),
+        (
+            "51% a 75%",
+            faixas_preenchimento.get(
+                "de_51_a_75",
+                0
+            ),
+            colors.HexColor("#f59e0b")
+        ),
+        (
+            "76% a 99%",
+            faixas_preenchimento.get(
+                "de_76_a_99",
+                0
+            ),
+            azul
+        ),
+        (
+            "100% ou mais",
+            faixas_preenchimento.get(
+                "cem_ou_mais",
+                0
+            ),
+            verde
+        ),
+    ]
+
+    faixa_gap = 10
+
+    faixa_w = (
+        largura_util
+        - faixa_gap * 4
+    ) / 5
+
+    faixa_h = 82
+
+    y_cards_faixas = (
+        y_faixas
+        - 100
+    )
+
+    total_turmas_faixas = sum(
+        item[1]
+        for item in faixas
+    )
+
+    for i, (
+        titulo_faixa,
+        valor_faixa,
+        cor_faixa
+    ) in enumerate(faixas):
+
+        x_faixa = (
+            margem
+            + i * (
+                faixa_w
+                + faixa_gap
+            )
+        )
+
+        pdf.setFillColor(
+            colors.white
+        )
+
+        pdf.setStrokeColor(
+            cinza_borda
+        )
+
+        pdf.roundRect(
+            x_faixa,
+            y_cards_faixas,
+            faixa_w,
+            faixa_h,
+            8,
+            fill=True,
+            stroke=True
+        )
+
+        # Barra superior
+        pdf.setFillColor(
+            cor_faixa
+        )
+
+        pdf.roundRect(
+            x_faixa,
+            y_cards_faixas
+            + faixa_h
+            - 5,
+            faixa_w,
+            5,
+            3,
+            fill=True,
+            stroke=False
+        )
+
+        pdf.setFillColor(
+            cinza_texto
+        )
+
+        pdf.setFont(
+            "Helvetica-Bold",
+            7
+        )
+
+        pdf.drawCentredString(
+            x_faixa
+            + faixa_w / 2,
+            y_cards_faixas
+            + 55,
+            titulo_faixa.upper()
+        )
+
+        pdf.setFillColor(
+            azul_escuro
+        )
+
+        pdf.setFont(
+            "Helvetica-Bold",
+            17
+        )
+
+        pdf.drawCentredString(
+            x_faixa
+            + faixa_w / 2,
+            y_cards_faixas
+            + 30,
+            _num(valor_faixa)
+        )
+
+        percentual_faixa = (
+            valor_faixa
+            / total_turmas_faixas
+            * 100
+            if total_turmas_faixas > 0
+            else 0
+        )
+
+        pdf.setFillColor(
+            cinza_texto
+        )
+
+        pdf.setFont(
+            "Helvetica",
+            7
+        )
+
+        pdf.drawCentredString(
+            x_faixa
+            + faixa_w / 2,
+            y_cards_faixas
+            + 13,
+            f"{_pct(percentual_faixa)} das turmas"
+        )
+
+
+    # =========================================================
+    # RANKINGS
+    # =========================================================
+
+    ranking_x = margem
+    ranking_w = largura_util
+
+    ranking_h = 132
+    ranking_gap_vertical = 12
+
+    ranking_y_inferior = 52
+
+    ranking_y_superior = (
+        ranking_y_inferior
+        + ranking_h
+        + ranking_gap_vertical
+    )
+
+
+    def desenhar_ranking(
+        x,
+        y_box,
+        titulo,
+        subtitulo,
+        turmas_ranking,
+        cor_destaque
+    ):
+
+        # -----------------------------------------------------
+        # CAIXA
+        # -----------------------------------------------------
+
+        pdf.setFillColor(
+            cinza_fundo
+        )
+
+        pdf.setStrokeColor(
+            cinza_borda
+        )
+
+        pdf.roundRect(
+            x,
+            y_box,
+            ranking_w,
+            ranking_h,
+            10,
+            fill=True,
+            stroke=True
+        )
+
+        # Barra superior
+        pdf.setFillColor(
+            cor_destaque
+        )
+
+        pdf.roundRect(
+            x,
+            y_box + ranking_h - 5,
+            ranking_w,
+            5,
+            3,
+            fill=True,
+            stroke=False
+        )
+
+        # -----------------------------------------------------
+        # TÍTULO
+        # -----------------------------------------------------
+
+        pdf.setFillColor(
+            azul_escuro
+        )
+
+        pdf.setFont(
+            "Helvetica-Bold",
+            9
+        )
+
+        pdf.drawString(
+            x + 14,
+            y_box + ranking_h - 23,
+            titulo
+        )
+
+        pdf.setFillColor(
+            cinza_texto
+        )
+
+        pdf.setFont(
+            "Helvetica",
+            6.5
+        )
+
+        pdf.drawString(
+            x + 14,
+            y_box + ranking_h - 35,
+            subtitulo
+        )
+
+        # -----------------------------------------------------
+        # CABEÇALHO DA TABELA
+        # -----------------------------------------------------
+
+        y_linha = (
+            y_box
+            + ranking_h
+            - 56
+        )
+
+        tabela_x = x + 14
+        tabela_w = ranking_w - 28
+
+        pdf.setFillColor(
+            colors.HexColor("#e2e8f0")
+        )
+
+        pdf.rect(
+            tabela_x,
+            y_linha - 3,
+            tabela_w,
+            14,
+            fill=True,
+            stroke=False
+        )
+
+        # Posições das colunas
+        col_turma = tabela_x + 8
+
+        col_uo = (
+            tabela_x
+            + tabela_w * 0.43
+        )
+
+        col_preench = (
+            tabela_x
+            + tabela_w
+            - 8
+        )
+
+        pdf.setFillColor(
+            azul_escuro
+        )
+
+        pdf.setFont(
+            "Helvetica-Bold",
+            6
+        )
+
+        pdf.drawString(
+            col_turma,
+            y_linha + 1,
+            "TURMA"
+        )
+
+        pdf.drawString(
+            col_uo,
+            y_linha + 1,
+            "UO"
+        )
+
+        pdf.drawRightString(
+            col_preench,
+            y_linha + 1,
+            "PREENCHIMENTO"
+        )
+
+        # -----------------------------------------------------
+        # LINHAS
+        # -----------------------------------------------------
+
+        y_linha -= 15
+
+        for turma in turmas_ranking[:5]:
+
+            codigo_turma = str(
+                turma.get(
+                    "turma",
+                    "-"
+                )
+            )
+
+            nome_uo = str(
+                turma.get(
+                    "uo",
+                    "-"
+                )
+            )
+
+            preenchimento = float(
+                turma.get(
+                    "preenchimento",
+                    0
+                )
+                or 0
+            )
+
+            if len(codigo_turma) > 32:
+                codigo_turma = (
+                    codigo_turma[:29]
+                    + "..."
+                )
+
+            if len(nome_uo) > 55:
+                nome_uo = (
+                    nome_uo[:52]
+                    + "..."
+                )
+
+            pdf.setFillColor(
+                azul_escuro
+            )
+
+            pdf.setFont(
+                "Helvetica",
+                6
+            )
+
+            pdf.drawString(
+                col_turma,
+                y_linha,
+                codigo_turma
+            )
+
+            pdf.setFillColor(
+                cinza_texto
+            )
+
+            pdf.drawString(
+                col_uo,
+                y_linha,
+                nome_uo
+            )
+
+            pdf.setFillColor(
+                cor_destaque
+            )
+
+            pdf.setFont(
+                "Helvetica-Bold",
+                6
+            )
+
+            pdf.drawRightString(
+                col_preench,
+                y_linha,
+                _pct(preenchimento)
+            )
+
+            pdf.setStrokeColor(
+                cinza_borda
+            )
+
+            pdf.line(
+                tabela_x + 4,
+                y_linha - 4,
+                tabela_x + tabela_w - 4,
+                y_linha - 4
+            )
+
+            y_linha -= 13
+
+
+    # =========================================================
+    # MAIORES TAXAS
+    # =========================================================
+
+    desenhar_ranking(
+        ranking_x,
+        ranking_y_superior,
+        "Maiores Taxas de Preenchimento",
+        "Turmas com maior relação entre ocupados e vagas.",
+        maior_preenchimento,
+        verde
+    )
+
+
+    # =========================================================
+    # MENORES TAXAS
+    # =========================================================
+
+    desenhar_ranking(
+        ranking_x,
+        ranking_y_inferior,
+        "Menores Taxas de Preenchimento",
+        "Turmas com vagas cadastradas e menor nível de ocupação.",
+        menor_preenchimento,
+        colors.HexColor("#ef4444")
+    )
+
+
+    # =========================================================
+    # RODAPÉ — PÁGINA 2
+    # =========================================================
+
+    pdf.setFillColor(
+        colors.HexColor("#94a3b8")
+    )
+
+    pdf.setFont(
+        "Helvetica",
+        6.5
+    )
+
+    pdf.drawString(
+        40,
+        28,
+        "Fonte: Painel Educação Profissional SENAI-RS"
+    )
+
+    pdf.drawRightString(
+        largura - 40,
+        28,
+        "Página 2"
+    )
+
+    pdf.showPage()
+
+    # =========================================================
+    # PÁGINA 3 — TURMAS POR MODALIDADE E PROGRAMA
+    # =========================================================
+
+    # ---------------------------------------------------------
+    # CABEÇALHO
+    # ---------------------------------------------------------
+
+    pdf.setFillColor(
+        azul_escuro
+    )
+
+    pdf.rect(
+        0,
+        altura - 100,
+        largura,
+        100,
+        fill=True,
+        stroke=False
+    )
+
+    pdf.setFillColor(
+        colors.white
+    )
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        18
+    )
+
+    pdf.drawString(
+        40,
+        altura - 42,
+        "Turmas Detalhadas"
+    )
+
+    pdf.setFont(
+        "Helvetica",
+        9
+    )
+
+    pdf.drawString(
+        40,
+        altura - 61,
+        f"Turmas por Modalidade e Programa | {ano} | {periodo}"
+    )
+
+    # ---------------------------------------------------------
+    # FILTROS — DUAS LINHAS
+    # ---------------------------------------------------------
+
+    pdf.setFont(
+        "Helvetica",
+        7.5
+    )
+
+    if contexto_linha_1:
+
+        pdf.drawString(
+            40,
+            altura - 76,
+            " • ".join(contexto_linha_1)
+        )
+
+    if contexto_linha_2:
+
+        pdf.drawString(
+            40,
+            altura - 90,
+            " • ".join(contexto_linha_2)
+        )
+
+    _desenhar_logo_cabecalho(
+        pdf,
+        largura,
+        altura,
+        paisagem=paisagem
+    )
+
+
+    # =========================================================
+    # TÍTULO
+    # =========================================================
+
+    y = altura - 135
+
+    pdf.setFillColor(
+        azul_escuro
+    )
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        15
+    )
+
+    pdf.drawString(
+        40,
+        y,
+        "Turmas por Modalidade e Programa"
+    )
+
+    pdf.setFillColor(
+        cinza_texto
+    )
+
+    pdf.setFont(
+        "Helvetica",
+        8.5
+    )
+
+    pdf.drawString(
+        40,
+        y - 17,
+        "Distribuição das turmas, capacidade, ocupação e taxa de preenchimento por modalidade e programa."
+    )
+
+
+    # =========================================================
+    # CONFIGURAÇÃO DOS DOIS BLOCOS
+    # =========================================================
+
+    bloco_x = margem
+    bloco_w = largura_util
+
+    bloco_h = 132
+    bloco_gap_vertical = 14
+
+    bloco_y_programa = 58
+
+    bloco_y_modalidade = (
+        bloco_y_programa
+        + bloco_h
+        + bloco_gap_vertical
+    )
+
+
+    # =========================================================
+    # FUNÇÃO PARA DESENHAR TABELA RESUMO
+    # =========================================================
+
+    def desenhar_tabela_distribuicao(
+        x,
+        y_box,
+        largura_box,
+        altura_box,
+        titulo,
+        subtitulo,
+        registros,
+        campo_nome,
+        cor_destaque
+    ):
+
+        # -----------------------------------------------------
+        # CAIXA
+        # -----------------------------------------------------
+
+        pdf.setFillColor(
+            cinza_fundo
+        )
+
+        pdf.setStrokeColor(
+            cinza_borda
+        )
+
+        pdf.roundRect(
+            x,
+            y_box,
+            largura_box,
+            altura_box,
+            10,
+            fill=True,
+            stroke=True
+        )
+
+        # Barra superior
+        pdf.setFillColor(
+            cor_destaque
+        )
+
+        pdf.roundRect(
+            x,
+            y_box
+            + altura_box
+            - 5,
+            largura_box,
+            5,
+            3,
+            fill=True,
+            stroke=False
+        )
+
+        # -----------------------------------------------------
+        # TÍTULO
+        # -----------------------------------------------------
+
+        pdf.setFillColor(
+            azul_escuro
+        )
+
+        pdf.setFont(
+            "Helvetica-Bold",
+            10
+        )
+
+        pdf.drawString(
+            x + 14,
+            y_box
+            + altura_box
+            - 26,
+            titulo
+        )
+
+        pdf.setFillColor(
+            cinza_texto
+        )
+
+        pdf.setFont(
+            "Helvetica",
+            6.7
+        )
+
+        pdf.drawString(
+            x + 14,
+            y_box
+            + altura_box
+            - 40,
+            subtitulo
+        )
+
+        # -----------------------------------------------------
+        # ÁREA DA TABELA
+        # -----------------------------------------------------
+
+        tabela_x = x + 14
+        tabela_w = largura_box - 28
+
+        y_linha = (
+            y_box
+            + altura_box
+            - 64
+        )
+
+        # Cabeçalho
+        pdf.setFillColor(
+            colors.HexColor("#e2e8f0")
+        )
+
+        pdf.rect(
+            tabela_x,
+            y_linha - 4,
+            tabela_w,
+            17,
+            fill=True,
+            stroke=False
+        )
+
+        # -----------------------------------------------------
+        # POSIÇÕES DAS COLUNAS
+        # -----------------------------------------------------
+
+        col_nome = tabela_x + 8
+
+        col_turmas = (
+            tabela_x
+            + tabela_w * 0.57
+        )
+
+        col_vagas = (
+            tabela_x
+            + tabela_w * 0.70
+        )
+
+        col_ocupados = (
+            tabela_x
+            + tabela_w * 0.84
+        )
+
+        col_taxa = (
+            tabela_x
+            + tabela_w
+            - 7
+        )
+
+        pdf.setFillColor(
+            azul_escuro
+        )
+
+        pdf.setFont(
+            "Helvetica-Bold",
+            5.8
+        )
+
+        pdf.drawString(
+            col_nome,
+            y_linha + 1,
+            campo_nome.upper()
+        )
+
+        pdf.drawRightString(
+            col_turmas,
+            y_linha + 1,
+            "TURMAS"
+        )
+
+        pdf.drawRightString(
+            col_vagas,
+            y_linha + 1,
+            "VAGAS"
+        )
+
+        pdf.drawRightString(
+            col_ocupados,
+            y_linha + 1,
+            "OCUPAÇÃO"
+        )
+
+        pdf.drawRightString(
+            col_taxa,
+            y_linha + 1,
+            "%"
+        )
+
+        # -----------------------------------------------------
+        # REGISTROS
+        # -----------------------------------------------------
+
+        y_linha -= 17
+
+        registros_exibir = registros[:5]
+
+        for item in registros_exibir:
+
+            nome = str(
+                item.get(
+                    campo_nome,
+                    "-"
+                )
+                or "-"
+            )
+
+            turmas_item = int(
+                item.get(
+                    "turmas",
+                    0
+                )
+                or 0
+            )
+
+            vagas_item = int(
+                item.get(
+                    "vagas",
+                    0
+                )
+                or 0
+            )
+
+            ocupados_item = int(
+                item.get(
+                    "ocupados",
+                    0
+                )
+                or 0
+            )
+
+            taxa_item = float(
+                item.get(
+                    "taxa_preenchimento",
+                    0
+                )
+                or 0
+            )
+
+            # Nome
+            pdf.setFillColor(
+                azul_escuro
+            )
+
+            pdf.setFont(
+                "Helvetica",
+                5.9
+            )
+
+            pdf.drawString(
+                col_nome,
+                y_linha,
+                nome
+            )
+
+            # Turmas
+            pdf.setFillColor(
+                cinza_texto
+            )
+
+            pdf.drawRightString(
+                col_turmas,
+                y_linha,
+                _num(turmas_item)
+            )
+
+            # Vagas
+            pdf.drawRightString(
+                col_vagas,
+                y_linha,
+                _num(vagas_item)
+            )
+
+            # Ocupados
+            pdf.drawRightString(
+                col_ocupados,
+                y_linha,
+                _num(ocupados_item)
+            )
+
+            # Taxa
+            if taxa_item >= 100:
+
+                cor_taxa = verde
+
+            elif taxa_item >= 75:
+
+                cor_taxa = azul
+
+            elif taxa_item >= 51:
+
+                cor_taxa = colors.HexColor(
+                    "#f59e0b"
+                )
+
+            else:
+
+                cor_taxa = colors.HexColor(
+                    "#ef4444"
+                )
+
+            pdf.setFillColor(
+                cor_taxa
+            )
+
+            pdf.setFont(
+                "Helvetica-Bold",
+                5.9
+            )
+
+            pdf.drawRightString(
+                col_taxa,
+                y_linha,
+                _pct(taxa_item)
+            )
+
+            # Separador
+            pdf.setStrokeColor(
+                cinza_borda
+            )
+
+            pdf.line(
+                tabela_x + 4,
+                y_linha - 5,
+                tabela_x + tabela_w - 4,
+                y_linha - 5
+            )
+
+            y_linha -= 18
+
+        # -----------------------------------------------------
+        # AVISO SE HOUVER MAIS REGISTROS
+        # -----------------------------------------------------
+
+        if len(registros) > len(registros_exibir):
+
+            restantes = (
+                len(registros)
+                - len(registros_exibir)
+            )
+
+            pdf.setFillColor(
+                cinza_texto
+            )
+
+            pdf.setFont(
+                "Helvetica-Oblique",
+                5.8
+            )
+
+            pdf.drawString(
+                tabela_x + 4,
+                y_box + 13,
+                f"+ {restantes} registro(s) não exibido(s) nesta visão resumida."
+            )
+
+
+    # =========================================================
+    # MODALIDADES
+    # =========================================================
+
+    desenhar_tabela_distribuicao(
+        bloco_x,
+        bloco_y_modalidade,
+        bloco_w,
+        bloco_h,
+        "Distribuição por Modalidade",
+        "Modalidades ordenadas pela quantidade de turmas.",
+        modalidades_resumo,
+        "modalidade",
+        azul
+    )
+
+
+    # =========================================================
+    # PROGRAMAS
+    # =========================================================
+
+    desenhar_tabela_distribuicao(
+        bloco_x,
+        bloco_y_programa,
+        bloco_w,
+        bloco_h,
+        "Distribuição por Programa",
+        "Programas ordenados pela quantidade de turmas.",
+        programas_resumo,
+        "programa",
+        colors.HexColor("#6d5dfc")
+    )
+
+
+    # =========================================================
+    # RODAPÉ — PÁGINA 3
+    # =========================================================
+
+    pdf.setFillColor(
+        colors.HexColor("#94a3b8")
+    )
+
+    pdf.setFont(
+        "Helvetica",
+        6.5
+    )
+
+    pdf.drawString(
+        40,
+        28,
+        "Fonte: Painel Educação Profissional SENAI-RS"
+    )
+
+    pdf.drawRightString(
+        largura - 40,
+        28,
+        "Página 3"
+    )
+
+    pdf.showPage()
+
+    pdf.save()
+
+    buffer.seek(0)
+
+    return buffer

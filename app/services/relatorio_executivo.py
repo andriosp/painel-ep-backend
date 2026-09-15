@@ -2414,6 +2414,1066 @@ async def montar_preview_relatorio_indicadores_detalhados(
 
     return preview
 
+async def montar_preview_relatorio_turmas_detalhadas(
+    conn,
+    filtros,
+    opcoes,
+    incluir_todas_turmas: bool = False
+):
+    # ======================================================
+    # BASE DO RELATÓRIO
+    # ======================================================
+
+    preview = await montar_preview_relatorio_executivo(
+        conn,
+        filtros,
+        opcoes
+    )
+
+
+    # ======================================================
+    # FILTROS
+    # ======================================================
+
+    ano = filtros.ano
+
+    regiao = getattr(
+        filtros,
+        "regiao",
+        None
+    )
+
+    subregiao = getattr(
+        filtros,
+        "subregiao",
+        None
+    )
+
+    uo = getattr(
+        filtros,
+        "uo",
+        None
+    )
+
+    programa = getattr(
+        filtros,
+        "programa",
+        None
+    )
+
+    modalidade = getattr(
+        filtros,
+        "modalidade",
+        None
+    )
+
+
+    # ======================================================
+    # WHERE DINÂMICO
+    # ======================================================
+
+    where = [
+        "t.ano_referencia = $1"
+    ]
+
+    params = [
+        ano
+    ]
+
+    idx = 2
+
+    meses = filtros.meses or []
+
+    if meses:
+        where.append(
+            f"EXTRACT(MONTH FROM t.data_inicio)::int = ANY(${idx}::int[])"
+        )
+        params.append(meses)
+        idx += 1
+
+
+    # ------------------------------------------------------
+    # REGIÃO
+    # ------------------------------------------------------
+
+    if regiao:
+
+        where.append(
+            f"""
+            UPPER(TRIM(r.nome))
+                = UPPER(TRIM(${idx}))
+            """
+        )
+
+        params.append(
+            regiao
+        )
+
+        idx += 1
+
+
+    # ------------------------------------------------------
+    # SUB-REGIÃO
+    # ------------------------------------------------------
+
+    if subregiao:
+
+        # O filtro pode eventualmente chegar como código.
+        if str(subregiao).strip().isdigit():
+
+            where.append(
+                f"s.codigo = ${idx}"
+            )
+
+            params.append(
+                int(subregiao)
+            )
+
+        else:
+
+            where.append(
+                f"""
+                UPPER(TRIM(s.nome))
+                    = UPPER(TRIM(${idx}))
+                """
+            )
+
+            params.append(
+                subregiao
+            )
+
+        idx += 1
+
+
+    # ------------------------------------------------------
+    # UO
+    # ------------------------------------------------------
+
+    if uo:
+
+        # Permite código ou nome da UO.
+        if str(uo).strip().isdigit():
+
+            where.append(
+                f"u.codigo = ${idx}"
+            )
+
+            params.append(
+                int(uo)
+            )
+
+        else:
+
+            where.append(
+                f"""
+                UPPER(TRIM(u.nome))
+                    = UPPER(TRIM(${idx}))
+                """
+            )
+
+            params.append(
+                uo
+            )
+
+        idx += 1
+
+
+    # ------------------------------------------------------
+    # PROGRAMA
+    # ------------------------------------------------------
+
+    if programa:
+
+        # O frontend pode enviar código ou nome.
+        if str(programa).strip().isdigit():
+
+            where.append(
+                f"t.cod_programa = ${idx}"
+            )
+
+            params.append(
+                int(programa)
+            )
+
+        else:
+
+            where.append(
+                f"""
+                UPPER(TRIM(p.nome_programa))
+                    = UPPER(TRIM(${idx}))
+                """
+            )
+
+            params.append(
+                programa
+            )
+
+        idx += 1
+
+
+    # ------------------------------------------------------
+    # MODALIDADE
+    # ------------------------------------------------------
+
+    if modalidade:
+
+        if str(modalidade).strip().isdigit():
+
+            where.append(
+                f"t.cod_modalidade = ${idx}"
+            )
+
+            params.append(
+                int(modalidade)
+            )
+
+        else:
+
+            where.append(
+                f"""
+                UPPER(TRIM(m.nome))
+                    = UPPER(TRIM(${idx}))
+                """
+            )
+
+            params.append(
+                modalidade
+            )
+
+        idx += 1
+
+
+    where_sql = (
+        " AND ".join(where)
+    )
+
+
+    # ======================================================
+    # CONSULTA DAS TURMAS
+    # ======================================================
+
+    sql = f"""
+        SELECT
+            t.codigo,
+            t.codigo_sge,
+
+            t.cod_uo,
+            u.nome AS uo,
+            u.municipio,
+            u.geope,
+
+            s.codigo AS cod_subregiao,
+            s.nome AS subregiao,
+
+            r.codigo AS cod_regiao,
+            r.nome AS regiao,
+
+            t.cod_programa,
+            p.nome_programa AS programa,
+
+            t.cod_modalidade,
+            m.nome AS modalidade,
+
+            t.cod_curso,
+            c.nome_curso AS curso,
+
+            t.cod_formato,
+            frm.nome AS formato,
+
+            t.cod_turno,
+            trn.nome AS turno,
+
+            t.item_contabil_matriz,
+            t.periodo_letivo,
+
+            t.data_inicio,
+            t.data_fim,
+
+            COALESCE(
+                t.vagas_total,
+                0
+            ) AS vagas,
+
+            COALESCE(
+                tsr.matriculados,
+                0
+            ) AS matriculados,
+
+            COALESCE(
+                tsr.pre_matriculados,
+                0
+            ) AS pre_matriculados,
+
+            COALESCE(
+                tsr.cancelados,
+                0
+            ) AS cancelados,
+
+            COALESCE(
+                tsr.desistentes,
+                0
+            ) AS desistentes,
+
+            COALESCE(
+                tsr.evadidos,
+                0
+            ) AS evadidos,
+
+            COALESCE(
+                tsr.falecidos,
+                0
+            ) AS falecidos,
+
+            COALESCE(
+                t.incompany,
+                FALSE
+            ) AS incompany
+
+        FROM turmas t
+
+        LEFT JOIN turmas_status_resumo tsr
+            ON tsr.cod_turma = t.codigo
+
+        LEFT JOIN uo u
+            ON u.codigo = t.cod_uo
+
+        LEFT JOIN subregioes s
+            ON s.codigo = u.cod_subregiao
+
+        LEFT JOIN regioes r
+            ON r.codigo = s.codigo_regiao
+
+        LEFT JOIN programas p
+            ON p.codigo = t.cod_programa
+
+        LEFT JOIN modalidade m
+            ON m.codigo = t.cod_modalidade
+
+        LEFT JOIN curso c
+            ON c.codigo = t.cod_curso
+
+        LEFT JOIN formato frm
+            ON frm.codigo = t.cod_formato
+
+        LEFT JOIN turnos trn
+            ON trn.codigo = t.cod_turno
+
+        WHERE
+            {where_sql}
+
+        ORDER BY
+            u.nome,
+            t.data_inicio,
+            t.codigo_sge
+    """
+
+
+    rows = await conn.fetch(
+        sql,
+        *params
+    )
+
+
+    # ======================================================
+    # MONTA LISTA DE TURMAS
+    # ======================================================
+
+    turmas = []
+
+    total_vagas = 0
+    total_matriculados = 0
+    total_pre_matriculados = 0
+    total_cancelados = 0
+    total_desistentes = 0
+    total_evadidos = 0
+
+
+    for row in rows:
+
+        vagas = int(
+            row["vagas"]
+            or 0
+        )
+
+        matriculados = int(
+            row["matriculados"]
+            or 0
+        )
+
+        pre_matriculados = int(
+            row["pre_matriculados"]
+            or 0
+        )
+
+        cancelados = int(
+            row["cancelados"]
+            or 0
+        )
+
+        desistentes = int(
+            row["desistentes"]
+            or 0
+        )
+
+        evadidos = int(
+            row["evadidos"]
+            or 0
+        )
+
+
+        # Mesma lógica usada atualmente pelo painel:
+        # matriculados + pré-matriculados.
+        ocupados = (
+            matriculados
+            + pre_matriculados
+        )
+
+
+        if vagas > 0:
+
+            preenchimento = (
+                ocupados
+                / vagas
+            ) * 100
+
+        else:
+
+            preenchimento = None
+
+
+        total_vagas += vagas
+        total_matriculados += matriculados
+        total_pre_matriculados += pre_matriculados
+        total_cancelados += cancelados
+        total_desistentes += desistentes
+        total_evadidos += evadidos
+
+
+        turmas.append(
+            {
+                "codigo": row["codigo"],
+                "turma": row["codigo_sge"],
+
+                "cod_uo": row["cod_uo"],
+                "uo": row["uo"],
+                "municipio": row["municipio"],
+                "geope": row["geope"],
+
+                "cod_subregiao": row["cod_subregiao"],
+                "subregiao": row["subregiao"],
+
+                "cod_regiao": row["cod_regiao"],
+                "regiao": row["regiao"],
+
+                "cod_programa": row["cod_programa"],
+                "programa": row["programa"],
+
+                "cod_modalidade": row["cod_modalidade"],
+                "modalidade": row["modalidade"],
+
+                "cod_curso": row["cod_curso"],
+                "curso": row["curso"],
+
+                "cod_formato": row["cod_formato"],
+                "formato": row["formato"],
+
+                "cod_turno": row["cod_turno"],
+                "turno": row["turno"],
+
+                "item_contabil_matriz":
+                    row["item_contabil_matriz"],
+
+                "periodo_letivo":
+                    row["periodo_letivo"],
+
+                "data_inicio":
+                    row["data_inicio"],
+
+                "data_fim":
+                    row["data_fim"],
+
+                "vagas": vagas,
+
+                "matriculados":
+                    matriculados,
+
+                "pre_matriculados":
+                    pre_matriculados,
+
+                "ocupados":
+                    ocupados,
+
+                "cancelados":
+                    cancelados,
+
+                "desistentes":
+                    desistentes,
+
+                "evadidos":
+                    evadidos,
+
+                "falecidos":
+                    int(
+                        row["falecidos"]
+                        or 0
+                    ),
+
+                "preenchimento":
+                    preenchimento,
+
+                "incompany":
+                    bool(
+                        row["incompany"]
+                    ),
+            }
+        )
+
+
+    # ======================================================
+    # RESUMO GERAL
+    # ======================================================
+
+    total_ocupados = (
+        total_matriculados
+        + total_pre_matriculados
+    )
+
+
+    taxa_preenchimento = (
+        (
+            total_ocupados
+            / total_vagas
+        ) * 100
+        if total_vagas > 0
+        else None
+    )
+
+    # =========================================================
+    # PÁGINA 2 — OCUPAÇÃO E PREENCHIMENTO
+    # =========================================================
+
+    faixas_preenchimento = {
+        "sem_ocupacao": 0,
+        "ate_50": 0,
+        "de_51_a_75": 0,
+        "de_76_a_99": 0,
+        "cem_ou_mais": 0,
+    }
+
+    for turma in turmas:
+
+        preenchimento = float(
+            turma.get("preenchimento") or 0
+        )
+
+        ocupados = int(
+            turma.get("ocupados") or 0
+        )
+
+        if ocupados == 0:
+            faixas_preenchimento["sem_ocupacao"] += 1
+
+        elif preenchimento <= 50:
+            faixas_preenchimento["ate_50"] += 1
+
+        elif preenchimento <= 75:
+            faixas_preenchimento["de_51_a_75"] += 1
+
+        elif preenchimento < 100:
+            faixas_preenchimento["de_76_a_99"] += 1
+
+        else:
+            faixas_preenchimento["cem_ou_mais"] += 1
+
+
+    # ---------------------------------------------------------
+    # RANKING — MAIOR PREENCHIMENTO
+    # ---------------------------------------------------------
+
+    turmas_com_vagas = [
+        turma
+        for turma in turmas
+        if float(turma.get("vagas") or 0) > 0
+    ]
+
+
+    maior_preenchimento = sorted(
+        turmas_com_vagas,
+        key=lambda item: float(
+            item.get("preenchimento") or 0
+        ),
+        reverse=True
+    )[:10]
+
+
+    # ---------------------------------------------------------
+    # RANKING — MENOR PREENCHIMENTO
+    # ---------------------------------------------------------
+
+    menor_preenchimento = sorted(
+        turmas_com_vagas,
+        key=lambda item: float(
+            item.get("preenchimento") or 0
+        )
+    )[:10]
+
+    # =========================================================
+    # PÁGINA 3 — TURMAS POR MODALIDADE E PROGRAMA
+    # =========================================================
+
+    por_modalidade = {}
+    por_programa = {}
+
+
+    for turma in turmas:
+
+        # -----------------------------------------------------
+        # MODALIDADE
+        # -----------------------------------------------------
+
+        nome_modalidade = (
+            turma.get("modalidade")
+            or "NÃO INFORMADA"
+        )
+
+        if nome_modalidade not in por_modalidade:
+
+            por_modalidade[nome_modalidade] = {
+                "modalidade": nome_modalidade,
+                "turmas": 0,
+                "vagas": 0,
+                "ocupados": 0,
+                "matriculados": 0,
+                "pre_matriculados": 0,
+            }
+
+        por_modalidade[nome_modalidade]["turmas"] += 1
+
+        por_modalidade[nome_modalidade]["vagas"] += int(
+            turma.get("vagas") or 0
+        )
+
+        por_modalidade[nome_modalidade]["ocupados"] += int(
+            turma.get("ocupados") or 0
+        )
+
+        por_modalidade[nome_modalidade]["matriculados"] += int(
+            turma.get("matriculados") or 0
+        )
+
+        por_modalidade[nome_modalidade]["pre_matriculados"] += int(
+            turma.get("pre_matriculados") or 0
+        )
+
+
+        # -----------------------------------------------------
+        # PROGRAMA
+        # -----------------------------------------------------
+
+        nome_programa = (
+            turma.get("programa")
+            or "NÃO INFORMADO"
+        )
+
+        if nome_programa not in por_programa:
+
+            por_programa[nome_programa] = {
+                "programa": nome_programa,
+                "turmas": 0,
+                "vagas": 0,
+                "ocupados": 0,
+                "matriculados": 0,
+                "pre_matriculados": 0,
+            }
+
+        por_programa[nome_programa]["turmas"] += 1
+
+        por_programa[nome_programa]["vagas"] += int(
+            turma.get("vagas") or 0
+        )
+
+        por_programa[nome_programa]["ocupados"] += int(
+            turma.get("ocupados") or 0
+        )
+
+        por_programa[nome_programa]["matriculados"] += int(
+            turma.get("matriculados") or 0
+        )
+
+        por_programa[nome_programa]["pre_matriculados"] += int(
+            turma.get("pre_matriculados") or 0
+        )
+
+
+    # ---------------------------------------------------------
+    # CALCULAR TAXA DE PREENCHIMENTO
+    # ---------------------------------------------------------
+
+    for item in por_modalidade.values():
+
+        vagas = item["vagas"]
+        ocupados = item["ocupados"]
+
+        item["taxa_preenchimento"] = (
+            ocupados / vagas * 100
+            if vagas > 0
+            else 0
+        )
+
+
+    for item in por_programa.values():
+
+        vagas = item["vagas"]
+        ocupados = item["ocupados"]
+
+        item["taxa_preenchimento"] = (
+            ocupados / vagas * 100
+            if vagas > 0
+            else 0
+        )
+
+
+    # ---------------------------------------------------------
+    # CONVERTER PARA LISTAS E ORDENAR
+    # ---------------------------------------------------------
+
+    modalidades_resumo = sorted(
+        por_modalidade.values(),
+        key=lambda item: (
+            -item["turmas"],
+            item["modalidade"]
+        )
+    )
+
+
+    programas_resumo = sorted(
+        por_programa.values(),
+        key=lambda item: (
+            -item["turmas"],
+            item["programa"]
+        )
+    )
+
+    # =========================================================
+    # PÁGINA 4 — CRONOGRAMA DAS TURMAS
+    # =========================================================
+
+    cronograma_inicio = {
+        mes: {
+            "mes": mes,
+            "turmas": 0,
+            "vagas": 0,
+            "ocupados": 0,
+        }
+        for mes in range(1, 13)
+    }
+
+    cronograma_fim = {
+        mes: {
+            "mes": mes,
+            "turmas": 0,
+            "vagas": 0,
+            "ocupados": 0,
+        }
+        for mes in range(1, 13)
+    }
+
+
+    for turma in turmas:
+
+        data_inicio = turma.get("data_inicio")
+        data_fim = turma.get("data_fim")
+
+        vagas = int(
+            turma.get("vagas") or 0
+        )
+
+        ocupados = int(
+            turma.get("ocupados") or 0
+        )
+
+
+        # -----------------------------------------------------
+        # INÍCIO DAS TURMAS
+        # -----------------------------------------------------
+
+        if data_inicio:
+
+            try:
+                if isinstance(data_inicio, str):
+                    mes_inicio = int(
+                        data_inicio[5:7]
+                    )
+                else:
+                    mes_inicio = data_inicio.month
+
+                if mes_inicio in cronograma_inicio:
+
+                    cronograma_inicio[mes_inicio]["turmas"] += 1
+                    cronograma_inicio[mes_inicio]["vagas"] += vagas
+                    cronograma_inicio[mes_inicio]["ocupados"] += ocupados
+
+            except (ValueError, TypeError, AttributeError):
+                pass
+
+
+        # -----------------------------------------------------
+        # ENCERRAMENTO DAS TURMAS
+        # -----------------------------------------------------
+
+        if data_fim:
+
+            try:
+                if isinstance(data_fim, str):
+                    mes_fim = int(
+                        data_fim[5:7]
+                    )
+                else:
+                    mes_fim = data_fim.month
+
+                if mes_fim in cronograma_fim:
+
+                    cronograma_fim[mes_fim]["turmas"] += 1
+                    cronograma_fim[mes_fim]["vagas"] += vagas
+                    cronograma_fim[mes_fim]["ocupados"] += ocupados
+
+            except (ValueError, TypeError, AttributeError):
+                pass
+
+
+    cronograma_inicio_lista = list(
+        cronograma_inicio.values()
+    )
+
+    cronograma_fim_lista = list(
+        cronograma_fim.values()
+    )
+
+    # =========================================================
+    # SÍNTESE OPERACIONAL
+    # =========================================================
+
+    turmas_sem_ocupacao = [
+        turma
+        for turma in turmas
+        if int(turma.get("ocupados") or 0) == 0
+    ]
+
+    turmas_ate_50 = [
+        turma
+        for turma in turmas
+        if (
+            float(turma.get("vagas") or 0) > 0
+            and 0 < float(turma.get("preenchimento") or 0) <= 50
+        )
+    ]
+
+    turmas_100_ou_mais = [
+        turma
+        for turma in turmas
+        if (
+            float(turma.get("vagas") or 0) > 0
+            and float(turma.get("preenchimento") or 0) >= 100
+        )
+    ]
+
+
+    # ---------------------------------------------------------
+    # VAGAS NÃO OCUPADAS
+    # ---------------------------------------------------------
+
+    vagas_nao_ocupadas = max(
+        total_vagas - total_ocupados,
+        0
+    )
+
+
+    # ---------------------------------------------------------
+    # INDICADORES OPERACIONAIS
+    # ---------------------------------------------------------
+
+    sintese_operacional = {
+
+        "total_turmas": len(turmas),
+
+        "total_vagas": total_vagas,
+
+        "total_ocupados": total_ocupados,
+
+        "vagas_nao_ocupadas": vagas_nao_ocupadas,
+
+        "taxa_preenchimento": taxa_preenchimento,
+
+        "turmas_sem_ocupacao": len(
+            turmas_sem_ocupacao
+        ),
+
+        "turmas_ate_50": len(
+            turmas_ate_50
+        ),
+
+        "turmas_100_ou_mais": len(
+            turmas_100_ou_mais
+        ),
+
+        "percentual_turmas_sem_ocupacao": (
+            len(turmas_sem_ocupacao)
+            / len(turmas)
+            * 100
+            if turmas
+            else 0
+        ),
+
+        "percentual_turmas_ate_50": (
+            len(turmas_ate_50)
+            / len(turmas)
+            * 100
+            if turmas
+            else 0
+        ),
+
+        "percentual_turmas_100_ou_mais": (
+            len(turmas_100_ou_mais)
+            / len(turmas)
+            * 100
+            if turmas
+            else 0
+        ),
+    }
+
+    # =========================================================
+    # CONTROLE DE VOLUME DAS TURMAS
+    # =========================================================
+    # No preview do Swagger retornamos apenas uma amostra,
+    # evitando um JSON muito grande.
+    #
+    # Na geração do PDF, o parâmetro incluir_todas_turmas=True
+    # permitirá trabalhar com todas as turmas filtradas.
+
+    if incluir_todas_turmas:
+        turmas_saida = turmas
+    else:
+        turmas_saida = turmas[:20]
+
+    preview["turmas_detalhadas"] = {
+        "resumo": {
+            "total_turmas": len(turmas),
+            "total_vagas": total_vagas,
+            "matriculados": total_matriculados,
+            "pre_matriculados": total_pre_matriculados,
+            "ocupados": total_ocupados,
+            "taxa_preenchimento": taxa_preenchimento,
+            "cancelados": total_cancelados,
+            "desistentes": total_desistentes,
+            "evadidos": total_evadidos,
+        },
+
+        # =========================================================
+        # PÁGINA 1 — VISÃO GERAL DAS TURMAS
+        # =========================================================
+        "visao_geral": {
+            "cards": [
+                {
+                    "titulo": "Total de Turmas",
+                    "valor": len(turmas),
+                    "tipo": "numero",
+                },
+                {
+                    "titulo": "Vagas",
+                    "valor": total_vagas,
+                    "tipo": "numero",
+                },
+                {
+                    "titulo": "Ocupados",
+                    "valor": total_ocupados,
+                    "tipo": "numero",
+                },
+                {
+                    "titulo": "Taxa de Preenchimento",
+                    "valor": taxa_preenchimento,
+                    "tipo": "percentual",
+                },
+            ],
+
+            "movimentacao": {
+                "matriculados": total_matriculados,
+                "pre_matriculados": total_pre_matriculados,
+                "cancelados": total_cancelados,
+                "desistentes": total_desistentes,
+                "evadidos": total_evadidos,
+            },
+        },
+
+        # =========================================================
+        # PÁGINA 2 — OCUPAÇÃO E PREENCHIMENTO
+        # =========================================================
+        "ocupacao_preenchimento": {
+            "faixas": faixas_preenchimento,
+            "maior_preenchimento": maior_preenchimento,
+            "menor_preenchimento": menor_preenchimento,
+        },
+
+        # =========================================================
+        # PÁGINA 3 — TURMAS POR MODALIDADE E PROGRAMA
+        # =========================================================
+        "modalidade_programa": {
+            "modalidades": modalidades_resumo,
+            "programas": programas_resumo,
+        },
+
+        # =========================================================
+        # PÁGINA 4 — CRONOGRAMA DAS TURMAS
+        # =========================================================
+        "cronograma": {
+            "inicio": cronograma_inicio_lista,
+            "fim": cronograma_fim_lista,
+        },
+
+        # =========================================================
+        # SÍNTESE OPERACIONAL
+        # =========================================================
+        "sintese_operacional": sintese_operacional,
+
+        # No preview, retornamos apenas uma pequena amostra.
+        "turmas": turmas_saida,
+
+        # Quantidade real de turmas encontradas.
+        "total_registros": len(turmas),
+    }
+
+    # ======================================================
+    # CABEÇALHO
+    # ======================================================
+
+    preview[
+        "cabecalho_turmas_detalhadas"
+    ] = {
+
+        "ano":
+            ano,
+
+        "meses":
+            filtros.meses or [],
+
+        "regiao":
+            regiao,
+
+        "subregiao":
+            subregiao,
+
+        "uo":
+            uo,
+
+        "programa":
+            programa,
+
+        "modalidade":
+            modalidade,
+    }
+
+
+    return preview
+
 async def montar_preview_relatorio_desempenho_programa(
     conn,
     filtros,

@@ -21,6 +21,7 @@ from app.services.relatorio_executivo import (
     montar_preview_relatorio_desempenho_subregiao,
     montar_preview_relatorio_desempenho_regiao,
     montar_preview_relatorio_indicadores_detalhados,
+    montar_preview_relatorio_turmas_detalhadas,
 )
 from fastapi.responses import StreamingResponse, FileResponse
 from app.services.pptx_carteira_programas import gerar_pptx_carteira_programas
@@ -32,6 +33,7 @@ from app.services.pdf_relatorio_executivo import (
     gerar_pdf_relatorio_desempenho_subregiao,
     gerar_pdf_relatorio_desempenho_regiao,
     gerar_pdf_relatorio_indicadores_detalhados,
+    gerar_pdf_relatorio_turmas_detalhadas,
 )
 
 router = APIRouter()
@@ -94,6 +96,7 @@ class RelatorioFiltrosPayload(BaseModel):
     ano: int | None = None
     meses: list[int] = []
     programa: str | None = None
+    modalidade: str | None = None
     regiao: str | None = None
     subregiao: str | None = None
     uo: str | None = None
@@ -1592,6 +1595,32 @@ async def processar_matriculas_realizadas(request: Request, lote_id: int):
 
         ids = [r["id"] for r in ids_rows]
 
+        # =========================================================
+        # SNAPSHOT DE MATRÍCULAS
+        # No início do processamento do lote, limpa o realizado
+        # de matrículas do ano para reconstruí-lo com o lote atual.
+        # Não altera HA, receita ou despesa.
+        # =========================================================
+        ja_processadas = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM importacao_matriculas_staging
+            WHERE lote_id = $1
+            AND status IN ('RESOLVIDO', 'AMBIGUO', 'ERRO')
+            """,
+            lote_id
+        )
+
+        if (ja_processadas or 0) == 0:
+            await conn.execute(
+                """
+                UPDATE realizado_programas
+                SET matriculas_real = NULL
+                WHERE ano = $1
+                """,
+                lote["ano_referencia"]
+            )
+
         if not ids:
             processadas = await conn.fetchval(
                 """
@@ -1807,23 +1836,6 @@ async def processar_matriculas_realizadas(request: Request, lote_id: int):
             AND status = 'PENDENTE'
             """,
             ids
-        )
-
-        await conn.execute(
-            """
-            UPDATE realizado_programas rp
-            SET matriculas_real = NULL
-            WHERE EXISTS (
-                SELECT 1
-                FROM importacao_matriculas_staging s
-                WHERE s.lote_id = $1
-                AND s.status = 'RESOLVIDO'
-                AND s.cod_oferta_resolvido = rp.cod_oferta
-                AND s.ano = rp.ano
-                AND s.mes = rp.mes
-            )
-            """,
-            lote_id
         )
 
         await conn.execute(
@@ -21193,6 +21205,22 @@ async def gerar_relatorio(
                 "orientacao": payload.orientacao,
                 "preview": preview
             }
+        
+        if payload.tipo == "turmas_detalhadas":
+
+            preview = await montar_preview_relatorio_turmas_detalhadas(
+                conn,
+                payload.filtros,
+                payload.opcoes
+            )
+
+            return {
+                "ok": True,
+                "tipo": payload.tipo,
+                "formato": payload.formato,
+                "orientacao": payload.orientacao,
+                "preview": preview
+            }
 
     raise HTTPException(
         status_code=400,
@@ -21627,6 +21655,72 @@ async def gerar_relatorio_pdf(
 
             nome_arquivo = (
                 f"RelatorioIndicadoresDetalhados_"
+                f"{ano}_{periodo}.pdf"
+            )
+
+            return StreamingResponse(
+                pdf,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition":
+                    f'inline; filename="{nome_arquivo}"'
+                }
+            )
+        
+        if payload.tipo == "turmas_detalhadas":
+
+            preview = await montar_preview_relatorio_turmas_detalhadas(
+                conn,
+                payload.filtros,
+                payload.opcoes,
+                incluir_todas_turmas=True
+            )
+
+            pdf = gerar_pdf_relatorio_turmas_detalhadas(
+                preview,
+                payload.orientacao
+            )
+
+            ano = payload.filtros.ano or "ano"
+            meses = payload.filtros.meses or []
+
+            nomes_meses = {
+                1: "Jan",
+                2: "Fev",
+                3: "Mar",
+                4: "Abr",
+                5: "Mai",
+                6: "Jun",
+                7: "Jul",
+                8: "Ago",
+                9: "Set",
+                10: "Out",
+                11: "Nov",
+                12: "Dez",
+            }
+
+            if not meses:
+
+                periodo = "Anual"
+
+            elif len(meses) == 1:
+
+                periodo = nomes_meses.get(
+                    meses[0],
+                    str(meses[0])
+                )
+
+            else:
+
+                meses_ordenados = sorted(meses)
+
+                periodo = (
+                    f"{nomes_meses.get(meses_ordenados[0], meses_ordenados[0])}-"
+                    f"{nomes_meses.get(meses_ordenados[-1], meses_ordenados[-1])}"
+                )
+
+            nome_arquivo = (
+                f"RelatorioTurmasDetalhadas_"
                 f"{ano}_{periodo}.pdf"
             )
 
