@@ -2095,6 +2095,11 @@ async def importar_receita(request: Request, arquivo: UploadFile = File(...), an
                 if not cr:
                     erros.append("CR não informado")
 
+                # Busca o formato do CR no planejamento
+                if cr:
+                    cr_chave = str(cr).strip()
+                    cod_formato = cr_formato_map.get(cr_chave)
+
                 try:
                     if pd.isna(valor_raw) or valor_raw in ("", None):
                         continue
@@ -2141,11 +2146,6 @@ async def importar_receita(request: Request, arquivo: UploadFile = File(...), an
                     ) in ofertas_auxiliares
 
                     cr_auxiliar_autorizado = cr_chave in CRS_AUXILIARES_RECEITA
-
-                    if not possui_oferta_auxiliar and not cr_auxiliar_autorizado:
-                        erros.append(
-                            "CR não cadastrado em cr_planejamento ou sem cod_formato"
-                        )
 
                     if not possui_oferta_auxiliar and not cr_auxiliar_autorizado:
                         erros.append(
