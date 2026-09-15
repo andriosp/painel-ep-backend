@@ -1979,6 +1979,37 @@ async def importar_receita(request: Request, arquivo: UploadFile = File(...), an
                 """)
             }
 
+            # =========================================================
+            # OFERTAS AUXILIARES / REALIZADO SEM PLANEJAMENTO
+            # Permite reconhecer CRs que já possuem oferta criada
+            # diretamente no realizado, mesmo sem cr_planejamento.
+            # =========================================================
+            ofertas_auxiliares = {
+                (row["ano"], row["cr"], row["cod_uo"])
+                for row in await conn.fetch(
+                    """
+                    SELECT DISTINCT
+                        ano,
+                        cr,
+                        cod_uo
+                    FROM ofertas_programas
+                    WHERE origem = 'REALIZADO_SEM_PLANEJAMENTO'
+                    AND cr IS NOT NULL
+                    AND cod_uo IS NOT NULL
+                    """
+                )
+            }
+
+            # CRs de gestão/apoio autorizados a existir
+            # sem cadastro em cr_planejamento.
+            CRS_AUXILIARES_RECEITA = {
+                "30295010101002",  # GESTAO DA UO EP
+                "30295010101003",  # ATENDIMENTO AO CLIENTE EP
+                "30295010101005",  # INFRAESTRUTURA EP
+                "30295010301001",  # ETD EDUCACAO - FUNCOES ADMINISTRATIVAS
+                "30295010301002",  # ETD EDUCACAO - FUNCOES DE NEGOCIO
+            }
+
             registros = []
             total_validas = 0
             total_invalidas = 0
@@ -2022,14 +2053,6 @@ async def importar_receita(request: Request, arquivo: UploadFile = File(...), an
 
                 if not cr:
                     erros.append("CR não informado")
-                
-                if cr:
-                    cod_formato = cr_formato_map.get(cr)
-
-                    if cod_formato is None:
-                        erros.append(
-                            "CR não cadastrado em cr_planejamento ou sem cod_formato"
-                        )
 
                 try:
                     if pd.isna(valor_raw) or valor_raw in ("", None):
@@ -2065,6 +2088,21 @@ async def importar_receita(request: Request, arquivo: UploadFile = File(...), an
                     cod_uo = norm_int(cod_uo_raw) if not pd.isna(cod_uo_raw) else None
                 except Exception:
                     erros.append("cod_uo inválido")
+
+                # Validação do CR após ano e UO estarem normalizados
+                if cr and cod_formato is None:
+                    possui_oferta_auxiliar = (
+                        ano,
+                        cr,
+                        cod_uo
+                    ) in ofertas_auxiliares
+
+                    cr_auxiliar_autorizado = cr in CRS_AUXILIARES_RECEITA
+
+                    if not possui_oferta_auxiliar and not cr_auxiliar_autorizado:
+                        erros.append(
+                            "CR não cadastrado em cr_planejamento ou sem cod_formato"
+                        )
 
                 try:
                     cod_modalidade = norm_int(cod_modalidade_raw) if not pd.isna(cod_modalidade_raw) else None
@@ -2193,6 +2231,40 @@ async def processar_receita(request: Request, lote_id: int):
         )
 
         ids = [r["id"] for r in ids_rows]
+
+        # =========================================================
+        # SNAPSHOT DE RECEITA
+        # No início do processamento do lote, limpa a receita
+        # realizada dos anos presentes no lote para reconstruí-la
+        # exclusivamente com o snapshot atual.
+        #
+        # Executa somente antes do primeiro batch.
+        # Não altera matrículas, hora-aluno ou despesa.
+        # =========================================================
+        ja_processadas = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM importacao_receita_staging
+            WHERE lote_id = $1
+            AND status IN ('RESOLVIDO', 'AMBIGUO', 'ERRO')
+            """,
+            lote_id
+        )
+
+        if (ja_processadas or 0) == 0:
+            await conn.execute(
+                """
+                UPDATE realizado_programas rp
+                SET receita_real = NULL
+                WHERE rp.ano IN (
+                    SELECT DISTINCT ano
+                    FROM importacao_receita_staging
+                    WHERE lote_id = $1
+                    AND ano IS NOT NULL
+                )
+                """,
+                lote_id
+            )
 
         if not ids:
             processadas = await conn.fetchval(
@@ -2356,6 +2428,62 @@ async def processar_receita(request: Request, lote_id: int):
                     AND COALESCE(o.cod_modalidade, 0) = COALESCE(s.cod_modalidade, 0)
                     AND COALESCE(o.cod_programa, 0) = COALESCE(s.cod_programa, 0)
                     AND COALESCE(o.cod_formato, 0) = COALESCE(s.cod_formato, 0)
+            )
+            """,
+            ids
+        )
+
+        # =========================================================
+        # CRs AUXILIARES DE RECEITA
+        # Cria oferta por ano + CR + UO quando ainda não existir.
+        # Não exige modalidade, programa ou formato.
+        # =========================================================
+        await conn.execute(
+            """
+            INSERT INTO ofertas_programas (
+                cod_uo,
+                cr,
+                cod_programa,
+                cod_modalidade,
+                cod_financiamento,
+                qtd_matriculas,
+                qtd_hora_aluno,
+                valor_receita,
+                valor_despesa,
+                ano,
+                cod_formato,
+                origem
+            )
+            SELECT DISTINCT
+                s.cod_uo,
+                s.cr,
+                NULL::integer AS cod_programa,
+                NULL::integer AS cod_modalidade,
+                NULL::integer AS cod_financiamento,
+                0,
+                0,
+                0,
+                0,
+                s.ano,
+                NULL::integer AS cod_formato,
+                'REALIZADO_SEM_PLANEJAMENTO'
+            FROM importacao_receita_staging s
+            WHERE s.id = ANY($1::bigint[])
+            AND s.status = 'PENDENTE'
+            AND s.cr IN (
+                '30295010101002',
+                '30295010101003',
+                '30295010101005',
+                '30295010301001',
+                '30295010301002'
+            )
+            AND s.cod_uo IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM ofertas_programas o
+                WHERE o.ano = s.ano
+                    AND o.cr = s.cr
+                    AND o.cod_uo = s.cod_uo
             )
             """,
             ids
