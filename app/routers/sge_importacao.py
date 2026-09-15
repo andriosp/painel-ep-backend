@@ -3191,6 +3191,40 @@ async def processar_hora_aluno(request: Request, lote_id: int):
 
         ids = [r["id"] for r in ids_rows]
 
+        # =========================================================
+        # SNAPSHOT DE HORA-ALUNO
+        # No início do processamento do lote, limpa o realizado
+        # de HA dos anos presentes no lote para reconstruí-lo
+        # exclusivamente com o snapshot atual.
+        #
+        # Executa somente antes do primeiro batch.
+        # Não altera matrículas, receita ou despesa.
+        # =========================================================
+        ja_processadas = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM importacao_ha_staging
+            WHERE lote_id = $1
+            AND status IN ('RESOLVIDO', 'AMBIGUO', 'ERRO')
+            """,
+            lote_id
+        )
+
+        if (ja_processadas or 0) == 0:
+            await conn.execute(
+                """
+                UPDATE realizado_programas rp
+                SET ha_real = NULL
+                WHERE rp.ano IN (
+                    SELECT DISTINCT ano
+                    FROM importacao_ha_staging
+                    WHERE lote_id = $1
+                    AND ano IS NOT NULL
+                )
+                """,
+                lote_id
+            )
+
         if not ids:
             processadas = await conn.fetchval(
                 """
