@@ -1971,13 +1971,20 @@ async def importar_receita(request: Request, arquivo: UploadFile = File(...), an
             )
             lote_id = lote["id"]
 
+            cr_formato_rows = await conn.fetch(
+                """
+                SELECT
+                    TRIM(cr::text) AS cr,
+                    cod_formato
+                FROM cr_planejamento
+                WHERE cr IS NOT NULL
+                AND cod_formato IS NOT NULL
+                """
+            )
+
             cr_formato_map = {
-                norm_cr(row["cr"]): row["cod_formato"]
-                for row in await conn.fetch("""
-                    SELECT cr, cod_formato
-                    FROM cr_planejamento
-                    WHERE cr IS NOT NULL
-                """)
+                str(row["cr"]).strip(): row["cod_formato"]
+                for row in cr_formato_rows
             }
 
             # =========================================================
@@ -1986,12 +1993,16 @@ async def importar_receita(request: Request, arquivo: UploadFile = File(...), an
             # diretamente no realizado, mesmo sem cr_planejamento.
             # =========================================================
             ofertas_auxiliares = {
-                (row["ano"], row["cr"], row["cod_uo"])
+                (
+                    row["ano"],
+                    str(row["cr"]).strip(),
+                    row["cod_uo"]
+                )
                 for row in await conn.fetch(
                     """
                     SELECT DISTINCT
                         ano,
-                        cr,
+                        TRIM(cr::text) AS cr,
                         cod_uo
                     FROM ofertas_programas
                     WHERE origem = 'REALIZADO_SEM_PLANEJAMENTO'
@@ -2010,6 +2021,35 @@ async def importar_receita(request: Request, arquivo: UploadFile = File(...), an
                 "30295010301001",  # ETD EDUCACAO - FUNCOES ADMINISTRATIVAS
                 "30295010301002",  # ETD EDUCACAO - FUNCOES DE NEGOCIO
             }
+
+            # =========================================================
+            # DIAGNÓSTICO TEMPORÁRIO - CR x cr_planejamento
+            # Remover depois da validação.
+            # =========================================================
+            crs_excel = set()
+
+            for _, row_diag in df.iterrows():
+                cr_diag = norm_cr(row_diag.get("cr"))
+
+                if cr_diag:
+                    crs_excel.add(str(cr_diag).strip())
+
+            crs_encontrados = {
+                cr_diag
+                for cr_diag in crs_excel
+                if cr_diag in cr_formato_map
+            }
+
+            crs_nao_encontrados = sorted(
+                crs_excel - crs_encontrados
+            )
+
+            print("========== DIAGNÓSTICO RECEITA ==========")
+            print(f"CRs distintos no Excel: {len(crs_excel)}")
+            print(f"CRs encontrados no mapa: {len(crs_encontrados)}")
+            print(f"CRs NÃO encontrados no mapa: {len(crs_nao_encontrados)}")
+            print(f"CRs não encontrados: {crs_nao_encontrados}")
+            print("=========================================")
 
             registros = []
             total_validas = 0
@@ -2092,13 +2132,20 @@ async def importar_receita(request: Request, arquivo: UploadFile = File(...), an
 
                 # Validação do CR após ano e UO estarem normalizados
                 if cr and cod_formato is None:
+                    cr_chave = str(cr).strip()
+
                     possui_oferta_auxiliar = (
                         ano,
-                        cr,
+                        cr_chave,
                         cod_uo
                     ) in ofertas_auxiliares
 
-                    cr_auxiliar_autorizado = cr in CRS_AUXILIARES_RECEITA
+                    cr_auxiliar_autorizado = cr_chave in CRS_AUXILIARES_RECEITA
+
+                    if not possui_oferta_auxiliar and not cr_auxiliar_autorizado:
+                        erros.append(
+                            "CR não cadastrado em cr_planejamento ou sem cod_formato"
+                        )
 
                     if not possui_oferta_auxiliar and not cr_auxiliar_autorizado:
                         erros.append(
@@ -2188,6 +2235,14 @@ async def importar_receita(request: Request, arquivo: UploadFile = File(...), an
         "linhas_importadas": len(registros),
         "validas": total_validas,
         "invalidas": total_invalidas,
+
+        # diagnóstico temporário
+        "diagnostico_cr": {
+            "crs_excel": len(crs_excel),
+            "crs_encontrados": len(crs_encontrados),
+            "crs_nao_encontrados": len(crs_nao_encontrados),
+            "lista_nao_encontrados": crs_nao_encontrados,
+        },
     }
 
 @router.post("/importacoes/receita/processar/{lote_id}")
@@ -3127,7 +3182,8 @@ async def importar_hora_aluno(request: Request, arquivo: UploadFile = File(...),
                     erros.append("CR não informado")
                 
                 if cr:
-                    cod_formato = cr_formato_map.get(cr)
+                    cr_chave = str(cr).strip()
+                    cod_formato = cr_formato_map.get(cr_chave)
 
                     if cod_formato is None:
                         erros.append(
