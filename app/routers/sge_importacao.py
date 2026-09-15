@@ -1972,10 +1972,11 @@ async def importar_receita(request: Request, arquivo: UploadFile = File(...), an
             lote_id = lote["id"]
 
             cr_formato_map = {
-                row["cr"]: row["cod_formato"]
+                norm_cr(row["cr"]): row["cod_formato"]
                 for row in await conn.fetch("""
                     SELECT cr, cod_formato
                     FROM cr_planejamento
+                    WHERE cr IS NOT NULL
                 """)
             }
 
