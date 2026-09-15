@@ -2302,7 +2302,7 @@ async def processar_receita(request: Request, lote_id: int):
             SELECT COUNT(*)
             FROM importacao_receita_staging
             WHERE lote_id = $1
-            AND status IN ('RESOLVIDO', 'AMBIGUO', 'ERRO')
+            AND status IN ('RESOLVIDO', 'AMBIGUO')
             """,
             lote_id
         )
