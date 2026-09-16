@@ -17895,35 +17895,12 @@ async def processar_data(request: Request, lote_id: int):
 
                     movimentos_snapshot = {}
                     detalhe_alunos_rows = []
-                    resumo_snapshot = {}
 
                     for r in rows_snapshot:
                         codigo_sge = (r["turma"] or "").strip()
 
                         if not codigo_sge:
                             continue
-
-                        resumo = resumo_snapshot.get(
-                            codigo_sge,
-                            {
-                                "total_alunos": 0,
-                                "matriculados": 0,
-                                "pre_matriculados": 0,
-                                "cancelados": 0,
-                                "desistentes": 0,
-                                "evadidos": 0,
-                                "duplicados": 0,
-                            }
-                        )
-
-                        resumo["total_alunos"] += 1
-                        resumo["matriculados"] += r["matriculados"] or 0
-                        resumo["pre_matriculados"] += r["pre_matriculados"] or 0
-                        resumo["cancelados"] += r["cancelados"] or 0
-                        resumo["desistentes"] += r["desistentes"] or 0
-                        resumo["evadidos"] += r["evadidos"] or 0
-
-                        resumo_snapshot[codigo_sge] = resumo
 
                         cod_turma = turma_id_map.get(codigo_sge)
 
@@ -18005,57 +17982,6 @@ async def processar_data(request: Request, lote_id: int):
                             r["data_fim_contratoapr"],
                             payload_hash,
                         ))
-
-                        snapshot_rows = []
-
-                        for codigo_sge, dados in resumo_snapshot.items():
-                            hash_resumo = hash_linha({
-                                "lote_id": lote_id,
-                                "cod_turma": codigo_sge,
-                                "total_alunos": dados["total_alunos"],
-                                "qtd_matriculado": dados["matriculados"],
-                                "qtd_pre_matriculado": dados["pre_matriculados"],
-                                "qtd_cancelado": dados["cancelados"],
-                                "qtd_desistente": dados["desistentes"],
-                                "qtd_evadido": dados["evadidos"],
-                                "qtd_duplicados": dados["duplicados"],
-                            })
-
-                            snapshot_rows.append((
-                                lote_id,
-                                codigo_sge,
-                                dados["total_alunos"],
-                                dados["matriculados"],
-                                dados["pre_matriculados"],
-                                dados["cancelados"],
-                                dados["desistentes"],
-                                dados["evadidos"],
-                                dados["duplicados"],
-                                hash_resumo,
-                            ))
-
-                        if snapshot_rows:
-                            await conn.executemany(
-                                """
-                                INSERT INTO sge_matriculas_snapshot (
-                                    lote_id,
-                                    cod_turma,
-                                    total_alunos,
-                                    qtd_matriculado,
-                                    qtd_pre_matriculado,
-                                    qtd_cancelado,
-                                    qtd_desistente,
-                                    qtd_evadido,
-                                    qtd_duplicados,
-                                    hash_resumo
-                                )
-                                VALUES (
-                                    $1, $2, $3, $4, $5,
-                                    $6, $7, $8, $9, $10
-                                )
-                                """,
-                                snapshot_rows
-                            )
 
                     # -------------------------------------------------
                     # GRAVA MOVIMENTO MENSAL
@@ -18253,18 +18179,20 @@ async def processar_data(request: Request, lote_id: int):
                     )
                     SELECT
                         t.codigo AS cod_turma,
-                        COALESCE(s.qtd_matriculado, 0) AS matriculados,
-                        COALESCE(s.qtd_pre_matriculado, 0) AS pre_matriculados,
-                        COALESCE(s.qtd_cancelado, 0) AS cancelados,
-                        COALESCE(s.qtd_desistente, 0) AS desistentes,
-                        COALESCE(s.qtd_evadido, 0) AS evadidos,
-                        0 AS falecidos,
+                        COALESCE(SUM(ds.matriculados), 0)::int AS matriculados,
+                        COALESCE(SUM(ds.pre_matriculados), 0)::int AS pre_matriculados,
+                        COALESCE(SUM(ds.cancelados), 0)::int AS cancelados,
+                        COALESCE(SUM(ds.desistentes), 0)::int AS desistentes,
+                        COALESCE(SUM(ds.evadidos), 0)::int AS evadidos,
+                        COALESCE(SUM(ds.falecidos), 0)::int AS falecidos,
                         NOW() AS atualizado_em
-                    FROM sge_matriculas_snapshot s
+                    FROM data_staging ds
                     JOIN turmas t
-                        ON TRIM(UPPER(t.codigo_sge::text))
-                        = TRIM(UPPER(s.cod_turma::text))
-                    WHERE s.lote_id = $1
+                        ON TRIM(t.codigo_sge::text) = TRIM(ds.turma)
+                    WHERE ds.lote_id = $1
+                    AND ds.turma IS NOT NULL
+                    AND TRIM(ds.turma) <> ''
+                    GROUP BY t.codigo
                     """,
                     lote_id
                 )
@@ -18298,24 +18226,6 @@ async def processar_data(request: Request, lote_id: int):
                 # -------------------------------------------------
                 # 4. VALIDA SNAPSHOT E RESUMO
                 # -------------------------------------------------
-
-                snapshot_total = await conn.fetchval(
-                    """
-                    SELECT COUNT(*)
-                    FROM sge_matriculas_snapshot
-                    WHERE lote_id = $1
-                    """,
-                    lote_id
-                )
-
-                if not snapshot_total:
-                    raise HTTPException(
-                        status_code=500,
-                        detail=(
-                            f"Finalização bloqueada: o lote {lote_id} não possui "
-                            "registros em sge_matriculas_snapshot."
-                        )
-                    )
 
                 if not total_status_resumo:
                     raise HTTPException(
