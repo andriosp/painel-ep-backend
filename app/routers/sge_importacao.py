@@ -7536,59 +7536,148 @@ async def programas_summary(
         {filtro_meta_programa}
     ),
 
-    realizado AS (
+        realizado_total AS (
         SELECT
-            COALESCE(SUM(rp.matriculas_real),0) AS matriculas_real,
-            COALESCE(SUM(rp.ha_real),0) AS ha_real,
-            COALESCE(SUM(rp.receita_real),0) AS receita_real,
-
-            -- GR
-            COALESCE(SUM(CASE
-                WHEN ob.cod_financiamento = 1
-                THEN rp.matriculas_real
-                ELSE 0
-            END),0) AS matriculas_gr,
-
-            -- GNR
-            COALESCE(SUM(CASE
-                WHEN ob.cod_financiamento = 2
-                THEN rp.matriculas_real
-                ELSE 0
-            END),0) AS matriculas_g,
-
-            -- PG
-            COALESCE(SUM(CASE
-                WHEN ob.cod_financiamento IN (3,6,7,8,9)
-                THEN rp.matriculas_real
-                ELSE 0
-            END),0) AS matriculas_p,
-
-            -- HA GR
-            COALESCE(SUM(CASE
-                WHEN ob.cod_financiamento = 1
-                THEN rp.ha_real
-                ELSE 0
-            END),0) AS ha_gr,
-
-            -- HA GNR
-            COALESCE(SUM(CASE
-                WHEN ob.cod_financiamento = 2
-                THEN rp.ha_real
-                ELSE 0
-            END),0) AS ha_g,
-
-            -- HA PG
-            COALESCE(SUM(CASE
-                WHEN ob.cod_financiamento IN (3,6,7,8,9)
-                THEN rp.ha_real
-                ELSE 0
-            END),0) AS ha_p
-
+            COALESCE(SUM(rp.matriculas_real), 0) AS matriculas_real,
+            COALESCE(SUM(rp.ha_real), 0) AS ha_real,
+            COALESCE(SUM(rp.receita_real), 0) AS receita_real
         FROM realizado_programas rp
         JOIN ofertas_base ob
             ON ob.codigo = rp.cod_oferta
         WHERE rp.ano = $1
         {filtro_mes_real}
+    ),
+
+    cr_classificacao AS (
+        SELECT
+            TRIM(cp.cr) AS cr,
+            MIN(cp.cod_financiamento) AS cod_financiamento
+        FROM cr_planejamento cp
+        WHERE cp.cod_financiamento IS NOT NULL
+          AND NULLIF(TRIM(cp.cr), '') IS NOT NULL
+        GROUP BY TRIM(cp.cr)
+        HAVING COUNT(DISTINCT cp.cod_financiamento) = 1
+    ),
+
+    lote_matriculas_atual AS (
+        SELECT MAX(l.id) AS lote_id
+        FROM importacao_matriculas_lotes l
+        WHERE UPPER(COALESCE(l.status, '')) IN (
+            'PROCESSADO',
+            'PROCESSADO_COM_ERRO'
+        )
+          AND EXISTS (
+              SELECT 1
+              FROM importacao_matriculas_staging ms
+              WHERE ms.lote_id = l.id
+                AND ms.ano = $1
+                AND ms.cod_oferta_resolvido IS NOT NULL
+          )
+    ),
+
+    lote_ha_atual AS (
+        SELECT MAX(l.id) AS lote_id
+        FROM importacao_ha_lotes l
+        WHERE UPPER(COALESCE(l.status, '')) IN (
+            'PROCESSADO',
+            'PROCESSADO_COM_ERRO'
+        )
+          AND EXISTS (
+              SELECT 1
+              FROM importacao_ha_staging hs
+              WHERE hs.lote_id = l.id
+                AND hs.ano = $1
+                AND hs.cod_oferta_resolvido IS NOT NULL
+          )
+    ),
+
+    matriculas_financiamento AS (
+        SELECT
+            COALESCE(SUM(CASE
+                WHEN cc.cod_financiamento IN (1, 6)
+                THEN ms.valor
+                ELSE 0
+            END), 0) AS matriculas_gr,
+
+            COALESCE(SUM(CASE
+                WHEN cc.cod_financiamento = 2
+                THEN ms.valor
+                ELSE 0
+            END), 0) AS matriculas_g,
+
+            COALESCE(SUM(CASE
+                WHEN cc.cod_financiamento NOT IN (1, 2, 6)
+                THEN ms.valor
+                ELSE 0
+            END), 0) AS matriculas_p
+
+        FROM importacao_matriculas_staging ms
+
+        JOIN lote_matriculas_atual lm
+            ON lm.lote_id = ms.lote_id
+
+        JOIN ofertas_base ob
+            ON ob.codigo = ms.cod_oferta_resolvido
+
+        LEFT JOIN cr_classificacao cc
+            ON cc.cr = TRIM(ms.cr)
+
+        WHERE ms.ano = $1
+          AND ms.mes = ANY(${idx_mes}::int[])
+    ),
+
+    ha_financiamento AS (
+        SELECT
+            COALESCE(SUM(CASE
+                WHEN cc.cod_financiamento IN (1, 6)
+                THEN hs.valor
+                ELSE 0
+            END), 0) AS ha_gr,
+
+            COALESCE(SUM(CASE
+                WHEN cc.cod_financiamento = 2
+                THEN hs.valor
+                ELSE 0
+            END), 0) AS ha_g,
+
+            COALESCE(SUM(CASE
+                WHEN cc.cod_financiamento NOT IN (1, 2, 6)
+                THEN hs.valor
+                ELSE 0
+            END), 0) AS ha_p
+
+        FROM importacao_ha_staging hs
+
+        JOIN lote_ha_atual lh
+            ON lh.lote_id = hs.lote_id
+
+        JOIN ofertas_base ob
+            ON ob.codigo = hs.cod_oferta_resolvido
+
+        LEFT JOIN cr_classificacao cc
+            ON cc.cr = TRIM(hs.cr)
+
+        WHERE hs.ano = $1
+          AND hs.mes = ANY(${idx_mes}::int[])
+    ),
+
+    realizado AS (
+        SELECT
+            rt.matriculas_real,
+            rt.ha_real,
+            rt.receita_real,
+
+            mf.matriculas_gr,
+            mf.matriculas_g,
+            mf.matriculas_p,
+
+            hf.ha_gr,
+            hf.ha_g,
+            hf.ha_p
+
+        FROM realizado_total rt
+        CROSS JOIN matriculas_financiamento mf
+        CROSS JOIN ha_financiamento hf
     ),
 
     turmas AS (
