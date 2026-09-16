@@ -2438,6 +2438,73 @@ async def processar_receita(request: Request, lote_id: int):
             ids
         )
 
+        # =========================================================
+        # NÍVEL 2: REUTILIZA OFERTA REALIZADO_SEM_PLANEJAMENTO
+        # Resolve por ano + CR + UO quando existir exatamente uma
+        # oferta auxiliar já cadastrada.
+        # =========================================================
+        await conn.execute(
+            """
+            WITH candidatos AS (
+                SELECT
+                    s.id AS staging_id,
+                    o.codigo AS cod_oferta,
+                    COUNT(*) OVER (PARTITION BY s.id) AS qtd
+                FROM importacao_receita_staging s
+                JOIN ofertas_programas o
+                    ON o.ano = s.ano
+                    AND o.cr = s.cr
+                    AND COALESCE(o.cod_uo, 0) = COALESCE(s.cod_uo, 0)
+                    AND o.origem = 'REALIZADO_SEM_PLANEJAMENTO'
+                WHERE s.id = ANY($1::bigint[])
+                AND s.status = 'PENDENTE'
+            )
+            UPDATE importacao_receita_staging s
+            SET
+                cod_oferta_resolvido = c.cod_oferta,
+                status = 'RESOLVIDO',
+                erro = NULL
+            FROM candidatos c
+            WHERE s.id = c.staging_id
+            AND c.qtd = 1
+            AND s.status = 'PENDENTE'
+            """,
+            ids
+        )
+
+        # =========================================================
+        # NÍVEL 2B: AMBIGUIDADE EM OFERTA REALIZADA SEM PLANEJAMENTO
+        # Se houver mais de uma oferta para ano + CR + UO,
+        # não escolhe arbitrariamente e não cria nova oferta.
+        # =========================================================
+        await conn.execute(
+            """
+            WITH candidatos AS (
+                SELECT
+                    s.id AS staging_id,
+                    COUNT(*) AS qtd
+                FROM importacao_receita_staging s
+                JOIN ofertas_programas o
+                    ON o.ano = s.ano
+                    AND o.cr = s.cr
+                    AND COALESCE(o.cod_uo, 0) = COALESCE(s.cod_uo, 0)
+                    AND o.origem = 'REALIZADO_SEM_PLANEJAMENTO'
+                WHERE s.id = ANY($1::bigint[])
+                AND s.status = 'PENDENTE'
+                GROUP BY s.id
+            )
+            UPDATE importacao_receita_staging s
+            SET
+                status = 'AMBIGUO',
+                erro = 'Mais de uma oferta REALIZADO_SEM_PLANEJAMENTO encontrada para ano, CR e UO.'
+            FROM candidatos c
+            WHERE s.id = c.staging_id
+            AND c.qtd > 1
+            AND s.status = 'PENDENTE'
+            """,
+            ids
+        )
+
         await conn.execute(
             """
             INSERT INTO ofertas_programas (
