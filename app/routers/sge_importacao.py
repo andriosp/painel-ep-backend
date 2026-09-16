@@ -18169,30 +18169,26 @@ async def processar_data(request: Request, lote_id: int):
                     """
                     INSERT INTO turmas_status_resumo (
                         cod_turma,
-                        ano,
-                        mes,
                         matriculados,
                         pre_matriculados,
                         cancelados,
                         desistentes,
                         evadidos,
-                        falecidos
+                        falecidos,
+                        atualizado_em
                     )
                     SELECT
                         x.cod_turma,
-                        x.ano,
-                        x.mes,
                         x.matriculados,
                         x.pre_matriculados,
                         x.cancelados,
                         x.desistentes,
                         x.evadidos,
-                        x.falecidos
+                        x.falecidos,
+                        NOW()
                     FROM (
                         SELECT DISTINCT ON (s.cod_turma)
                             s.cod_turma,
-                            s.ano,
-                            s.mes,
                             s.matriculados,
                             s.pre_matriculados,
                             s.cancelados,
