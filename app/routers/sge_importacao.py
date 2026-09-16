@@ -18278,19 +18278,6 @@ async def processar_data(request: Request, lote_id: int):
                     f"a partir do staging ID {primeiro_id_batch}"
                 )
             
-            rows = await conn.fetch(
-                """
-                SELECT *
-                FROM data_staging
-                WHERE lote_id = $1
-                ORDER BY id
-                """,
-                lote_id
-            )
-
-            if not rows:
-                raise HTTPException(status_code=400, detail="Lote sem linhas na staging para processar.")
-            
             await conn.execute(
                 """
                 INSERT INTO curso (codigo_sge, nome_curso)
@@ -18731,10 +18718,19 @@ async def processar_data(request: Request, lote_id: int):
             # Finaliza somente esta rodada da fase TURMAS.
             # As fases de movimentos, detalhes e finalização serão executadas depois.
             if lote["etapa_processamento"] == "TURMAS":
-                novo_ultimo_staging_id = max(
+                primeiros_ids_turmas = [
                     r["primeiro_id_turma"]
                     for r in rows_turmas
-                )
+                    if r["primeiro_id_turma"] is not None
+                ]
+
+                if not primeiros_ids_turmas:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Não foi possível determinar o cursor das turmas desta rodada."
+                    )
+
+                novo_ultimo_staging_id = max(primeiros_ids_turmas)
 
                 linhas_processadas_atual = (
                     int(lote["linhas_processadas"] or 0)
@@ -18765,214 +18761,6 @@ async def processar_data(request: Request, lote_id: int):
                     "ultimo_staging_id": novo_ultimo_staging_id,
                     "mensagem": "Fase TURMAS em processamento."
                 }
-            
-            detalhe_alunos_rows = []
-
-            if "detalhes_por_turma" in locals():
-                for codigo_sge, itens in detalhes_por_turma.items():
-                    cod_turma = turmas_existentes.get(codigo_sge)
-                    if not cod_turma:
-                        continue
-
-                    for item in itens:
-                        payload_hash = hash_linha({
-                            "lote_id": lote_id,
-                            "cod_turma": codigo_sge,
-                            "ra": item["ra"],
-                            "cpf": item["cpf"],
-                            "nome_aluno": item["nome_aluno"],
-                            "status_matricula": item["status_matricula"],
-                            "condicao_aluno": item["condicao_aluno"],
-                            "data_matricula": item["data_matricula"],
-                        })
-
-                        detalhe_alunos_rows.append((
-                            lote_id,
-                            codigo_sge,
-                            item["ra"],
-                            item["cpf"],
-                            item["nome_aluno"],
-                            item["status_matricula"],
-                            item["cnpj"],
-                            item["condicao_aluno"],
-                            item["data_matricula"],
-                            item["data_ini_contratoapr"],
-                            item["data_fim_contratoapr"],
-                            payload_hash,
-                        ))
-            
-            codigos_turma_movimento = []
-            anos_movimento = []
-
-            for (codigo_sge, ano, mes) in movimentos_buffer.keys():
-                cod_turma = turmas_existentes.get(codigo_sge)
-
-                if cod_turma:
-                    codigos_turma_movimento.append(cod_turma)
-                    anos_movimento.append(ano)
-
-            codigos_turma_movimento = sorted(set(codigos_turma_movimento))
-            anos_movimento = sorted(set(anos_movimento))
-
-            if anos_movimento:
-                await conn.execute(
-                    """
-                    DELETE FROM turmas_movimento_mensal
-                    WHERE ano = ANY($1::int[])
-                    """,
-                    anos_movimento
-                )
-
-            movimentos_finais = []
-
-            for (codigo_sge, ano, mes), dados in movimentos_buffer.items():
-                cod_turma = turmas_existentes.get(codigo_sge)
-                if not cod_turma:
-                    continue
-
-                movimentos_finais.append((
-                    cod_turma,
-                    ano,
-                    mes,
-                    dados["matriculados"],
-                    dados["pre_matriculados"]
-                ))
-            
-            if movimentos_finais:
-                await conn.executemany(
-                    """
-                    INSERT INTO turmas_movimento_mensal (
-                        cod_turma,
-                        ano,
-                        mes,
-                        matriculados,
-                        pre_matriculados
-                    )
-                    VALUES ($1, $2, $3, $4, $5)
-                    ON CONFLICT (cod_turma, ano, mes)
-                    DO UPDATE SET
-                        matriculados = EXCLUDED.matriculados,
-                        pre_matriculados = EXCLUDED.pre_matriculados
-                    """,
-                    movimentos_finais
-                )
-
-            # O data.xlsx representa uma carga completa.
-            # Substituímos integralmente os detalhes da carga anterior.
-            await conn.execute(
-                """
-                TRUNCATE TABLE sge_turma_detalhe_alunos RESTART IDENTITY
-                """
-            )
-
-            if detalhe_alunos_rows:
-                await conn.executemany(
-                    """
-                    INSERT INTO sge_turma_detalhe_alunos (
-                        lote_id,
-                        cod_turma,
-                        ra,
-                        cpf,
-                        nome_aluno,
-                        status_matricula,
-                        cnpj,
-                        condicao_aluno,
-                        data_matricula,
-                        data_ini_contratoapr,
-                        data_fim_contratoapr,
-                        hash_linha
-                    )
-                    VALUES (
-                        $1, $2, $3, $4, $5, $6,
-                        $7, $8, $9, $10, $11, $12
-                    )
-                    """,
-                    detalhe_alunos_rows
-                )
-
-            # Atualiza os quantitativos de alunos usando somente
-            # o snapshot mais recente de cada turma.
-            await conn.execute(
-                """
-                WITH ultimo_snapshot AS (
-                    SELECT DISTINCT ON (UPPER(TRIM(s.cod_turma)))
-                        UPPER(TRIM(s.cod_turma)) AS codigo_sge,
-                        COALESCE(s.qtd_matriculado, 0) AS matriculados,
-                        COALESCE(s.qtd_pre_matriculado, 0) AS pre_matriculados,
-                        COALESCE(s.qtd_cancelado, 0) AS cancelados,
-                        COALESCE(s.qtd_desistente, 0) AS desistentes,
-                        COALESCE(s.qtd_evadido, 0) AS evadidos
-                    FROM sge_matriculas_snapshot s
-                    ORDER BY
-                        UPPER(TRIM(s.cod_turma)),
-                        s.lote_id DESC,
-                        s.id DESC
-                )
-                INSERT INTO turmas_status_resumo (
-                    cod_turma,
-                    matriculados,
-                    pre_matriculados,
-                    cancelados,
-                    desistentes,
-                    evadidos,
-                    falecidos,
-                    atualizado_em
-                )
-                SELECT
-                    t.codigo,
-                    us.matriculados,
-                    us.pre_matriculados,
-                    us.cancelados,
-                    us.desistentes,
-                    us.evadidos,
-                    COALESCE(tsr.falecidos, 0),
-                    CURRENT_TIMESTAMP
-                FROM ultimo_snapshot us
-
-                JOIN turmas t
-                    ON UPPER(TRIM(t.codigo_sge)) = us.codigo_sge
-
-                LEFT JOIN turmas_status_resumo tsr
-                    ON tsr.cod_turma = t.codigo
-
-                WHERE t.codigo_sge = ANY($1::text[])
-
-                ON CONFLICT (cod_turma)
-                DO UPDATE SET
-                    matriculados = EXCLUDED.matriculados,
-                    pre_matriculados = EXCLUDED.pre_matriculados,
-                    cancelados = EXCLUDED.cancelados,
-                    desistentes = EXCLUDED.desistentes,
-                    evadidos = EXCLUDED.evadidos,
-                    atualizado_em = CURRENT_TIMESTAMP
-                """,
-                codigos_sge
-            )
-
-            await conn.execute(
-                """
-                DELETE FROM data_staging
-                WHERE lote_id = $1
-                """,
-                lote_id
-            )
-
-            await conn.execute(
-                """
-                UPDATE data_import_lotes
-                SET status_processamento = 'processado',
-                    data_processamento = CURRENT_TIMESTAMP
-                WHERE id = $1
-                """,
-                lote_id
-            )
-
-    return {
-        "ok": True,
-        "lote_id": lote_id,
-        "turmas_processadas": turmas_processadas,
-        "mensagem": "Lote processado com sucesso."
-    }
 
 @router.post("/auth/login")
 async def auth_login(payload: LoginPayload, request: Request, response: Response):
