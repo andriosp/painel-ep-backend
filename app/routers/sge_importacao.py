@@ -19008,7 +19008,7 @@ async def importar_contratos_pf(request: Request, arquivo: UploadFile = File(...
 @router.post("/importacoes/contratos-pf/processar/{lote_id}")
 async def processar_contratos_pf(request: Request, lote_id: int):
     pool = request.app.state.pool
-    batch_size = 200
+    batch_size = 50
 
     async with pool.acquire() as conn:
         lote = await conn.fetchrow(
@@ -19052,7 +19052,12 @@ async def processar_contratos_pf(request: Request, lote_id: int):
                 SELECT COUNT(*)
                 FROM importacao_contratos_pf_linhas
                 WHERE lote_id = $1
-                  AND status IN ('RESOLVIDO', 'ERRO', 'FORA_ESCOPO')
+                  AND status IN (
+                    'RESOLVIDO',
+                    'ERRO',
+                    'FORA_ESCOPO',
+                    'SEM_MOVIMENTO'
+                )
                 """,
                 lote_id
             )
