@@ -17625,6 +17625,7 @@ async def importar_data(request: Request, arquivo: UploadFile = File(...)):
 @router.post("/importacoes/data/processar/{lote_id}")
 async def processar_data(request: Request, lote_id: int):
     pool = request.app.state.pool
+    batch_size = 200
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -17639,7 +17640,644 @@ async def processar_data(request: Request, lote_id: int):
 
             if not lote:
                 raise HTTPException(status_code=404, detail="Lote não encontrado.")
+            
+            # Inicializa o processamento controlado do lote
+            if not lote["etapa_processamento"]:
+                await conn.execute(
+                    """
+                    UPDATE data_import_lotes
+                    SET status_processamento = 'processando',
+                        etapa_processamento = 'TURMAS',
+                        ultimo_staging_id = NULL,
+                        linhas_processadas = 0,
+                        data_processamento = NULL
+                    WHERE id = $1
+                    """,
+                    lote_id
+                )
 
+                lote = await conn.fetchrow(
+                    """
+                    SELECT *
+                    FROM data_import_lotes
+                    WHERE id = $1
+                    """,
+                    lote_id
+                )
+
+            ultimo_staging_id = lote["ultimo_staging_id"] or 0
+
+            rows_turmas = await conn.fetch(
+                """
+                WITH todas_turmas AS (
+                    SELECT
+                        TRIM(turma) AS turma,
+                        MIN(id) AS primeiro_id
+                    FROM data_staging
+                    WHERE lote_id = $1
+                    AND turma IS NOT NULL
+                    AND TRIM(turma) <> ''
+                    GROUP BY TRIM(turma)
+                ),
+                proximas_turmas AS (
+                    SELECT
+                        turma,
+                        primeiro_id
+                    FROM todas_turmas
+                    WHERE primeiro_id > $2
+                    ORDER BY primeiro_id
+                    LIMIT $3
+                )
+                SELECT
+                    ds.*,
+                    pt.primeiro_id AS primeiro_id_turma
+                FROM data_staging ds
+                JOIN proximas_turmas pt
+                ON TRIM(ds.turma) = pt.turma
+                WHERE ds.lote_id = $1
+                ORDER BY pt.primeiro_id, ds.id
+                """,
+                lote_id,
+                ultimo_staging_id,
+                batch_size
+            )
+
+            # Se não houver mais turmas para processar,
+            # encerra a fase TURMAS e prepara a próxima fase.
+            if lote["etapa_processamento"] == "TURMAS" and not rows_turmas:
+                await conn.execute(
+                    """
+                    UPDATE data_import_lotes
+                    SET etapa_processamento = 'SNAPSHOT_INIT',
+                        ultimo_staging_id = NULL,
+                        linhas_processadas = 0
+                    WHERE id = $1
+                    """,
+                    lote_id
+                )
+
+                return {
+                    "ok": True,
+                    "lote_id": lote_id,
+                    "etapa": "TURMAS",
+                    "proxima_etapa": "SNAPSHOT_INIT",
+                    "concluido": False,
+                    "turmas_processadas": 0,
+                    "turmas_na_rodada": 0,
+                    "linhas_na_rodada": 0,
+                    "mensagem": "Fase TURMAS concluída. Próxima fase: inicialização do SNAPSHOT."
+                }
+            
+            # Proteção temporária:
+            # a fase SNAPSHOT ainda será implementada em processamento controlado.
+            if lote["etapa_processamento"] == "SNAPSHOT_INIT":
+                total_staging = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM data_staging
+                    WHERE lote_id = $1
+                    """,
+                    lote_id
+                )
+
+                total_turmas_staging = await conn.fetchval(
+                    """
+                    SELECT COUNT(DISTINCT TRIM(turma))
+                    FROM data_staging
+                    WHERE lote_id = $1
+                    AND turma IS NOT NULL
+                    AND TRIM(turma) <> ''
+                    """,
+                    lote_id
+                )
+
+                if not total_staging:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Não há dados no staging para inicializar o snapshot."
+                    )
+
+                # Descobre somente os anos efetivamente presentes neste lote.
+                anos_snapshot = await conn.fetch(
+                    """
+                    SELECT DISTINCT EXTRACT(YEAR FROM data_inicio)::int AS ano
+                    FROM data_staging
+                    WHERE lote_id = $1
+                    AND data_inicio IS NOT NULL
+                    ORDER BY 1
+                    """,
+                    lote_id
+                )
+
+                anos_snapshot = [
+                    r["ano"]
+                    for r in anos_snapshot
+                    if r["ano"] is not None
+                ]
+
+                # O data.xlsx é uma carga completa.
+                # A limpeza abaixo ocorre UMA ÚNICA VEZ antes da reconstrução.
+                if anos_snapshot:
+                    await conn.execute(
+                        """
+                        DELETE FROM turmas_movimento_mensal
+                        WHERE ano = ANY($1::int[])
+                        """,
+                        anos_snapshot
+                    )
+
+                await conn.execute(
+                    """
+                    TRUNCATE TABLE sge_turma_detalhe_alunos RESTART IDENTITY
+                    """
+                )
+
+                # Prepara o cursor para a reconstrução do snapshot.
+                await conn.execute(
+                    """
+                    UPDATE data_import_lotes
+                    SET etapa_processamento = 'SNAPSHOT',
+                        ultimo_staging_id = NULL,
+                        linhas_processadas = 0
+                    WHERE id = $1
+                    """,
+                    lote_id
+                )
+
+                return {
+                    "ok": True,
+                    "lote_id": lote_id,
+                    "etapa": "SNAPSHOT_INIT",
+                    "proxima_etapa": "SNAPSHOT",
+                    "concluido": False,
+                    "linhas_staging": total_staging,
+                    "turmas_staging": total_turmas_staging,
+                    "anos_snapshot": anos_snapshot,
+                    "mensagem": "SNAPSHOT inicializado. Reconstrução pronta para começar."
+                }
+
+            if lote["etapa_processamento"] == "SNAPSHOT":
+                ultimo_snapshot_id = lote["ultimo_staging_id"] or 0
+
+                rows_snapshot = await conn.fetch(
+                    """
+                    WITH todas_turmas AS (
+                        SELECT
+                            TRIM(turma) AS turma,
+                            MIN(id) AS primeiro_id
+                        FROM data_staging
+                        WHERE lote_id = $1
+                        AND turma IS NOT NULL
+                        AND TRIM(turma) <> ''
+                        GROUP BY TRIM(turma)
+                    ),
+                    proximas_turmas AS (
+                        SELECT
+                            turma,
+                            primeiro_id
+                        FROM todas_turmas
+                        WHERE primeiro_id > $2
+                        ORDER BY primeiro_id
+                        LIMIT $3
+                    )
+                    SELECT
+                        ds.*,
+                        pt.primeiro_id AS primeiro_id_turma
+                    FROM data_staging ds
+                    JOIN proximas_turmas pt
+                    ON TRIM(ds.turma) = pt.turma
+                    WHERE ds.lote_id = $1
+                    ORDER BY pt.primeiro_id, ds.id
+                    """,
+                    lote_id,
+                    ultimo_snapshot_id,
+                    batch_size
+                )
+
+                # Por enquanto apenas prepara o lote.
+                # O processamento real será implementado no próximo passo.
+                if rows_snapshot:
+                    turmas_snapshot = {
+                        str(r["turma"]).strip()
+                        for r in rows_snapshot
+                        if r["turma"] is not None
+                        and str(r["turma"]).strip()
+                    }
+
+                    # Busca os IDs internos das turmas deste bloco.
+                    turmas_snapshot_db = await conn.fetch(
+                        """
+                        SELECT codigo, codigo_sge
+                        FROM turmas
+                        WHERE codigo_sge = ANY($1::text[])
+                        """,
+                        list(turmas_snapshot)
+                    )
+
+                    turma_id_map = {
+                        str(r["codigo_sge"]).strip(): r["codigo"]
+                        for r in turmas_snapshot_db
+                    }
+
+                    movimentos_snapshot = {}
+                    detalhe_alunos_rows = []
+
+                    for r in rows_snapshot:
+                        codigo_sge = (r["turma"] or "").strip()
+
+                        if not codigo_sge:
+                            continue
+
+                        cod_turma = turma_id_map.get(codigo_sge)
+
+                        if not cod_turma:
+                            continue
+
+                        # -------------------------------------------------
+                        # MOVIMENTO MENSAL
+                        # -------------------------------------------------
+                        ano_referencia = (
+                            r["data_inicio"].year
+                            if r["data_inicio"]
+                            else None
+                        )
+
+                        mes_referencia = (
+                            r["data_matricula"].month
+                            if r["data_matricula"]
+                            else None
+                        )
+
+                        if ano_referencia and mes_referencia:
+                            chave_mov = (
+                                cod_turma,
+                                ano_referencia,
+                                mes_referencia
+                            )
+
+                            atual = movimentos_snapshot.get(
+                                chave_mov,
+                                {
+                                    "matriculados": 0,
+                                    "pre_matriculados": 0
+                                }
+                            )
+
+                            atual["matriculados"] += r["matriculados"] or 0
+                            atual["pre_matriculados"] += r["pre_matriculados"] or 0
+
+                            movimentos_snapshot[chave_mov] = atual
+
+                        # -------------------------------------------------
+                        # DETALHE DE ALUNOS
+                        # -------------------------------------------------
+                        status_matricula = (
+                            (r["status_matricula"] or "").strip().upper()
+                            if r["status_matricula"]
+                            else None
+                        )
+
+                        condicao_aluno = (
+                            (r["condicao_aluno"] or "").strip()
+                            if r["condicao_aluno"]
+                            else None
+                        )
+
+                        payload_hash = hash_linha({
+                            "lote_id": lote_id,
+                            "cod_turma": codigo_sge,
+                            "ra": None,
+                            "cpf": None,
+                            "nome_aluno": None,
+                            "status_matricula": status_matricula,
+                            "condicao_aluno": condicao_aluno,
+                            "data_matricula": r["data_matricula"],
+                        })
+
+                        detalhe_alunos_rows.append((
+                            lote_id,
+                            codigo_sge,
+                            None,  # ra
+                            None,  # cpf
+                            None,  # nome_aluno
+                            status_matricula,
+                            r["cnpj"],
+                            condicao_aluno,
+                            r["data_matricula"],
+                            r["data_ini_contratoapr"],
+                            r["data_fim_contratoapr"],
+                            payload_hash,
+                        ))
+
+                    # -------------------------------------------------
+                    # GRAVA MOVIMENTO MENSAL
+                    # -------------------------------------------------
+                    movimentos_finais = [
+                        (
+                            cod_turma,
+                            ano,
+                            mes,
+                            dados["matriculados"],
+                            dados["pre_matriculados"]
+                        )
+                        for (cod_turma, ano, mes), dados
+                        in movimentos_snapshot.items()
+                    ]
+
+                    if movimentos_finais:
+                        await conn.executemany(
+                            """
+                            INSERT INTO turmas_movimento_mensal (
+                                cod_turma,
+                                ano,
+                                mes,
+                                matriculados,
+                                pre_matriculados
+                            )
+                            VALUES ($1, $2, $3, $4, $5)
+                            ON CONFLICT (cod_turma, ano, mes)
+                            DO UPDATE SET
+                                matriculados = EXCLUDED.matriculados,
+                                pre_matriculados = EXCLUDED.pre_matriculados
+                            """,
+                            movimentos_finais
+                        )
+
+                    # -------------------------------------------------
+                    # GRAVA DETALHES
+                    # -------------------------------------------------
+                    if detalhe_alunos_rows:
+                        await conn.executemany(
+                            """
+                            INSERT INTO sge_turma_detalhe_alunos (
+                                lote_id,
+                                cod_turma,
+                                ra,
+                                cpf,
+                                nome_aluno,
+                                status_matricula,
+                                cnpj,
+                                condicao_aluno,
+                                data_matricula,
+                                data_ini_contratoapr,
+                                data_fim_contratoapr,
+                                hash_linha
+                            )
+                            VALUES (
+                                $1, $2, $3, $4, $5, $6,
+                                $7, $8, $9, $10, $11, $12
+                            )
+                            """,
+                            detalhe_alunos_rows
+                        )
+
+                    # -------------------------------------------------
+                    # AVANÇA O CURSOR SOMENTE APÓS GRAVAR O BLOCO
+                    # -------------------------------------------------
+                    novo_ultimo_snapshot_id = max(
+                        r["primeiro_id_turma"]
+                        for r in rows_snapshot
+                    )
+
+                    linhas_processadas_atual = (
+                        int(lote["linhas_processadas"] or 0)
+                        + len(rows_snapshot)
+                    )
+
+                    await conn.execute(
+                        """
+                        UPDATE data_import_lotes
+                        SET ultimo_staging_id = $2,
+                            linhas_processadas = $3
+                        WHERE id = $1
+                        """,
+                        lote_id,
+                        novo_ultimo_snapshot_id,
+                        linhas_processadas_atual
+                    )
+
+                    return {
+                        "ok": True,
+                        "lote_id": lote_id,
+                        "etapa": "SNAPSHOT",
+                        "concluido": False,
+                        "turmas_na_rodada": len(turmas_snapshot),
+                        "linhas_na_rodada": len(rows_snapshot),
+                        "movimentos_gravados": len(movimentos_finais),
+                        "detalhes_gravados": len(detalhe_alunos_rows),
+                        "linhas_processadas": linhas_processadas_atual,
+                        "ultimo_staging_id": novo_ultimo_snapshot_id,
+                        "mensagem": "Bloco do SNAPSHOT processado com sucesso."
+                    }
+
+                total_snapshot = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM data_staging
+                    WHERE lote_id = $1
+                    """,
+                    lote_id
+                )
+
+                turmas_snapshot_total = await conn.fetchval(
+                    """
+                    SELECT COUNT(DISTINCT TRIM(turma))
+                    FROM data_staging
+                    WHERE lote_id = $1
+                    AND turma IS NOT NULL
+                    AND TRIM(turma) <> ''
+                    """,
+                    lote_id
+                )
+
+                await conn.execute(
+                    """
+                    UPDATE data_import_lotes
+                    SET etapa_processamento = 'FINALIZACAO',
+                        ultimo_staging_id = NULL
+                    WHERE id = $1
+                    """,
+                    lote_id
+                )
+
+                return {
+                    "ok": True,
+                    "lote_id": lote_id,
+                    "etapa": "SNAPSHOT",
+                    "proxima_etapa": "FINALIZACAO",
+                    "concluido": False,
+                    "linhas_staging": total_snapshot,
+                    "turmas_staging": turmas_snapshot_total,
+                    "mensagem": "Fase SNAPSHOT concluída. Próxima fase: FINALIZACAO."
+                }
+            
+            if lote["etapa_processamento"] == "FINALIZACAO":
+
+                # -------------------------------------------------
+                # 1. VALIDA O STAGING ANTES DE FINALIZAR
+                # -------------------------------------------------
+                total_staging = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM data_staging
+                    WHERE lote_id = $1
+                    """,
+                    lote_id
+                )
+
+                total_turmas_staging = await conn.fetchval(
+                    """
+                    SELECT COUNT(DISTINCT TRIM(turma))
+                    FROM data_staging
+                    WHERE lote_id = $1
+                    AND turma IS NOT NULL
+                    AND TRIM(turma) <> ''
+                    """,
+                    lote_id
+                )
+
+                if not total_staging:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Staging vazio. O lote não pode ser finalizado."
+                    )
+
+                # -------------------------------------------------
+                # 2. RECONSTRÓI turmas_status_resumo
+                # -------------------------------------------------
+                await conn.execute(
+                    """
+                    DELETE FROM turmas_status_resumo
+                    """
+                )
+
+                await conn.execute(
+                    """
+                    INSERT INTO turmas_status_resumo (
+                        cod_turma,
+                        ano,
+                        mes,
+                        matriculados,
+                        pre_matriculados,
+                        cancelados,
+                        desistentes,
+                        evadidos,
+                        falecidos
+                    )
+                    SELECT
+                        x.cod_turma,
+                        x.ano,
+                        x.mes,
+                        x.matriculados,
+                        x.pre_matriculados,
+                        x.cancelados,
+                        x.desistentes,
+                        x.evadidos,
+                        x.falecidos
+                    FROM (
+                        SELECT DISTINCT ON (s.cod_turma)
+                            s.cod_turma,
+                            s.ano,
+                            s.mes,
+                            s.matriculados,
+                            s.pre_matriculados,
+                            s.cancelados,
+                            s.desistentes,
+                            s.evadidos,
+                            s.falecidos
+                        FROM sge_matriculas_snapshot s
+                        ORDER BY
+                            s.cod_turma,
+                            s.ano DESC,
+                            s.mes DESC
+                    ) x
+                    """
+                )
+
+                # -------------------------------------------------
+                # 3. DIAGNÓSTICOS ANTES DE APAGAR O STAGING
+                # -------------------------------------------------
+                total_movimentos = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM turmas_movimento_mensal
+                    """
+                )
+
+                total_detalhes = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM sge_turma_detalhe_alunos
+                    WHERE lote_id = $1
+                    """,
+                    lote_id
+                )
+
+                total_status_resumo = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM turmas_status_resumo
+                    """
+                )
+
+                # -------------------------------------------------
+                # 4. FINALIZA O LOTE
+                # -------------------------------------------------
+                await conn.execute(
+                    """
+                    UPDATE data_import_lotes
+                    SET status_processamento = 'processado',
+                        etapa_processamento = 'CONCLUIDO',
+                        linhas_processadas = $2,
+                        ultimo_staging_id = NULL,
+                        data_processamento = NOW()
+                    WHERE id = $1
+                    """,
+                    lote_id,
+                    total_staging
+                )
+
+                # -------------------------------------------------
+                # 5. SOMENTE AGORA REMOVE O STAGING
+                # -------------------------------------------------
+                await conn.execute(
+                    """
+                    DELETE FROM data_staging
+                    WHERE lote_id = $1
+                    """,
+                    lote_id
+                )
+
+                return {
+                    "ok": True,
+                    "lote_id": lote_id,
+                    "etapa": "CONCLUIDO",
+                    "concluido": True,
+                    "linhas_processadas": total_staging,
+                    "turmas_processadas": total_turmas_staging,
+                    "movimentos": total_movimentos,
+                    "detalhes": total_detalhes,
+                    "status_resumo": total_status_resumo,
+                    "mensagem": "Processamento do data.xlsx concluído com sucesso."
+                }
+
+            if lote["etapa_processamento"] == "TURMAS" and rows_turmas:
+                turmas_batch = {
+                    str(r["turma"]).strip()
+                    for r in rows_turmas
+                    if r["turma"] is not None and str(r["turma"]).strip()
+                }
+
+                primeiro_id_batch = min(r["id"] for r in rows_turmas)
+
+                print(
+                    f"[DATA lote {lote_id}] "
+                    f"Fase TURMAS preparada: "
+                    f"{len(turmas_batch)} turmas / "
+                    f"{len(rows_turmas)} linhas "
+                    f"a partir do staging ID {primeiro_id_batch}"
+                )
+            
             rows = await conn.fetch(
                 """
                 SELECT *
@@ -17683,7 +18321,7 @@ async def processar_data(request: Request, lote_id: int):
 
             codigos_sge = sorted({
                 (r["turma"] or "").strip()
-                for r in rows
+                for r in rows_turmas
                 if (r["turma"] or "").strip()
             })
 
@@ -17743,7 +18381,7 @@ async def processar_data(request: Request, lote_id: int):
 
             codigos_curso = sorted({
                 str(r["codigo_curso"]).strip()
-                for r in rows
+                for r in rows_turmas
                 if (
                     r["codigo_curso"] is not None
                     and str(r["codigo_curso"]).strip().upper()
@@ -17782,7 +18420,7 @@ async def processar_data(request: Request, lote_id: int):
 
             detalhes_por_turma = {}
 
-            for r in rows:
+            for r in rows_turmas:
                 codigo_sge = (r["turma"] or "").strip()
                 if not codigo_sge:
                     continue
@@ -17941,18 +18579,16 @@ async def processar_data(request: Request, lote_id: int):
                 
                 if ano_referencia and mes_referencia:
                     chave_mov = (codigo_sge, ano_referencia, mes_referencia)
-                    if ano_referencia and mes_referencia:
-                        chave_mov = (codigo_sge, ano_referencia, mes_referencia)
 
-                        atual = movimentos_buffer.get(chave_mov, {
-                            "matriculados": 0,
-                            "pre_matriculados": 0
-                        })
+                    atual = movimentos_buffer.get(chave_mov, {
+                        "matriculados": 0,
+                        "pre_matriculados": 0
+                    })
 
-                        atual["matriculados"] += r["matriculados"] or 0
-                        atual["pre_matriculados"] += r["pre_matriculados"] or 0
+                    atual["matriculados"] += r["matriculados"] or 0
+                    atual["pre_matriculados"] += r["pre_matriculados"] or 0
 
-                        movimentos_buffer[chave_mov] = atual
+                    movimentos_buffer[chave_mov] = atual
 
                 if codigo_sge not in detalhes_por_turma:
                     detalhes_por_turma[codigo_sge] = []
@@ -18091,6 +18727,44 @@ async def processar_data(request: Request, lote_id: int):
                     turmas_existentes[row["codigo_sge"]] = row["codigo"]
                 
                 turmas_processadas = len(turmas_update_buffer) + len(turmas_insert_buffer)
+            
+            # Finaliza somente esta rodada da fase TURMAS.
+            # As fases de movimentos, detalhes e finalização serão executadas depois.
+            if lote["etapa_processamento"] == "TURMAS":
+                novo_ultimo_staging_id = max(
+                    r["primeiro_id_turma"]
+                    for r in rows_turmas
+                )
+
+                linhas_processadas_atual = (
+                    int(lote["linhas_processadas"] or 0)
+                    + len(rows_turmas)
+                )
+
+                await conn.execute(
+                    """
+                    UPDATE data_import_lotes
+                    SET ultimo_staging_id = $2,
+                        linhas_processadas = $3
+                    WHERE id = $1
+                    """,
+                    lote_id,
+                    novo_ultimo_staging_id,
+                    linhas_processadas_atual
+                )
+
+                return {
+                    "ok": True,
+                    "lote_id": lote_id,
+                    "etapa": "TURMAS",
+                    "concluido": False,
+                    "turmas_processadas": turmas_processadas,
+                    "turmas_na_rodada": len(turmas_batch),
+                    "linhas_na_rodada": len(rows_turmas),
+                    "linhas_processadas": linhas_processadas_atual,
+                    "ultimo_staging_id": novo_ultimo_staging_id,
+                    "mensagem": "Fase TURMAS em processamento."
+                }
             
             detalhe_alunos_rows = []
 
