@@ -17559,8 +17559,7 @@ async def importar_data(request: Request, arquivo: UploadFile = File(...)):
             if registros:
                 print("REGISTROS PARA INSERIR:", len(registros))
 
-                await conn.executemany(
-                    """
+                sql_insert_staging = """
                     INSERT INTO data_staging (
                         lote_id,
                         turma,
@@ -17592,11 +17591,26 @@ async def importar_data(request: Request, arquivo: UploadFile = File(...)):
                     )
                     VALUES (
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-                        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27
+                        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+                        $21,$22,$23,$24,$25,$26,$27
                     )
-                    """,
-                    registros
-                )
+                """
+
+                tamanho_lote_insert = 5000
+
+                for inicio in range(0, len(registros), tamanho_lote_insert):
+                    fim = inicio + tamanho_lote_insert
+                    bloco = registros[inicio:fim]
+
+                    await conn.executemany(
+                        sql_insert_staging,
+                        bloco
+                    )
+
+                    print(
+                        f"DATA_STAGING: "
+                        f"{min(fim, len(registros))}/{len(registros)} linhas inseridas"
+                    )
 
                 total_staging = await conn.fetchval(
                     "SELECT COUNT(*) FROM data_staging WHERE lote_id = $1",
