@@ -18178,30 +18178,21 @@ async def processar_data(request: Request, lote_id: int):
                         atualizado_em
                     )
                     SELECT
-                        x.cod_turma,
-                        x.matriculados,
-                        x.pre_matriculados,
-                        x.cancelados,
-                        x.desistentes,
-                        x.evadidos,
-                        x.falecidos,
-                        NOW()
-                    FROM (
-                        SELECT DISTINCT ON (s.cod_turma)
-                            s.cod_turma,
-                            s.matriculados,
-                            s.pre_matriculados,
-                            s.cancelados,
-                            s.desistentes,
-                            s.evadidos,
-                            s.falecidos
-                        FROM sge_matriculas_snapshot s
-                        ORDER BY
-                            s.cod_turma,
-                            s.ano DESC,
-                            s.mes DESC
-                    ) x
-                    """
+                        t.codigo AS cod_turma,
+                        COALESCE(s.qtd_matriculado, 0) AS matriculados,
+                        COALESCE(s.qtd_pre_matriculado, 0) AS pre_matriculados,
+                        COALESCE(s.qtd_cancelado, 0) AS cancelados,
+                        COALESCE(s.qtd_desistente, 0) AS desistentes,
+                        COALESCE(s.qtd_evadido, 0) AS evadidos,
+                        0 AS falecidos,
+                        NOW() AS atualizado_em
+                    FROM sge_matriculas_snapshot s
+                    JOIN turmas t
+                        ON TRIM(UPPER(t.codigo_sge::text))
+                        = TRIM(UPPER(s.cod_turma::text))
+                    WHERE s.lote_id = $1
+                    """,
+                    lote_id
                 )
 
                 # -------------------------------------------------
