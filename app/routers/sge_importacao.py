@@ -17639,7 +17639,7 @@ async def importar_data(request: Request, arquivo: UploadFile = File(...)):
 @router.post("/importacoes/data/processar/{lote_id}")
 async def processar_data(request: Request, lote_id: int):
     pool = request.app.state.pool
-    batch_size = 200
+    batch_size = 50
 
     async with pool.acquire() as conn:
         async with conn.transaction():
