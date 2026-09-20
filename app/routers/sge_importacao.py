@@ -8396,23 +8396,54 @@ async def relatorio_programa_resumo(
             proj_acum AS (
                 SELECT
                     COALESCE(SUM(pp.matriculas_proj), 0) AS mat_proj,
-                    COALESCE(SUM(pp.ha_proj), 0) AS ha_proj,
                     COALESCE(SUM(pp.receita_proj), 0) AS rec_proj
                 FROM projetado_programas pp
                 JOIN ofertas_filtradas ofi
-                  ON ofi.codigo = pp.cod_oferta
+                ON ofi.codigo = pp.cod_oferta
                 WHERE pp.ano = $1
-                  AND pp.mes <= $4
+                AND pp.mes <= $4
+            ),
+
+            ha_proj_acum AS (
+                SELECT
+                    COALESCE(SUM(v.ha), 0) AS ha_proj
+                FROM vw_ha_previsao_consolidada v
+                JOIN turmas t
+                ON UPPER(TRIM(t.codigo_sge)) = UPPER(TRIM(v.codigo_sge))
+                WHERE v.ano = $1
+                AND v.mes <= $4
+                AND (
+                        CASE
+                            WHEN t.cod_programa = 29 THEN 11
+                            WHEN t.cod_programa = 30 THEN 7
+                            ELSE t.cod_programa
+                        END
+                    ) = $2
             ),
             proj_anual AS (
                 SELECT
                     COALESCE(SUM(pp.matriculas_proj), 0) AS mat_proj_anual,
-                    COALESCE(SUM(pp.ha_proj), 0) AS ha_proj_anual,
                     COALESCE(SUM(pp.receita_proj), 0) AS rec_proj_anual
                 FROM projetado_programas pp
                 JOIN ofertas_filtradas ofi
                 ON ofi.codigo = pp.cod_oferta
                 WHERE pp.ano = $1
+            ),
+
+            ha_proj_anual AS (
+                SELECT
+                    COALESCE(SUM(v.ha), 0) AS ha_proj_anual
+                FROM vw_ha_previsao_consolidada v
+                JOIN turmas t
+                ON UPPER(TRIM(t.codigo_sge)) = UPPER(TRIM(v.codigo_sge))
+                WHERE v.ano = $1
+                AND (
+                        CASE
+                            WHEN t.cod_programa = 29 THEN 11
+                            WHEN t.cod_programa = 30 THEN 7
+                            ELSE t.cod_programa
+                        END
+                    ) = $2
             ),
             planejamento_anual AS (
                 SELECT
@@ -8748,11 +8779,11 @@ async def relatorio_programa_resumo(
                 COALESCE(NULLIF(pmm.ha_meta_mes_plan, 0), mm.ha_meta_mes, 0) AS ha_meta_mes,
                 COALESCE(NULLIF(pmp.ha_proj_mes_plan, 0), pm.ha_proj_mes, 0) AS ha_proj_mes,
                 ma.ha_meta,
-                pa.ha_proj,
+                hpa.ha_proj,
                 rf.ha_real,
 
                 COALESCE(NULLIF(paan.ha_meta_planejamento, 0), man.ha_meta_anual, 0) AS ha_meta_anual,
-                pan.ha_proj_anual,
+                hpaa.ha_proj_anual,
 
                 COALESCE(NULLIF(pmm.rec_meta_mes_plan, 0), mm.rec_meta_mes, 0) AS rec_meta_mes,
                 COALESCE(NULLIF(pmp.rec_proj_mes_plan, 0), pm.rec_proj_mes, 0) AS rec_proj_mes,
@@ -8772,7 +8803,9 @@ async def relatorio_programa_resumo(
             CROSS JOIN meta_acum ma
             CROSS JOIN meta_anual man
             CROSS JOIN proj_acum pa
+            CROSS JOIN ha_proj_acum hpa
             CROSS JOIN proj_anual pan
+            CROSS JOIN ha_proj_anual hpaan
             CROSS JOIN planejamento_anual paan
             CROSS JOIN planejamento_mes_meta pmm
             CROSS JOIN planejamento_mes_proj pmp
@@ -11802,27 +11835,125 @@ async def performance_preditiva(
             )
 
         sql_ha_garantida = f"""
+            WITH modalidade_por_curso AS (
+                SELECT
+                    cod_curso,
+                    MIN(cod_modalidade) AS cod_modalidade
+                FROM turmas
+                WHERE cod_modalidade IS NOT NULL
+                GROUP BY cod_curso
+                HAVING COUNT(DISTINCT cod_modalidade) = 1
+            ),
+
+            oficial AS (
+                SELECT
+                    h.competencia_mes AS mes,
+                    h.cod_modalidade,
+                    SUM(COALESCE(h.ha_total, 0)) AS valor
+
+                FROM vw_ha_previsao_resolvida h
+
+                JOIN uo u
+                    ON u.codigo = h.cod_uo
+
+                WHERE h.competencia_ano = $1
+                AND h.cod_modalidade IS NOT NULL
+                {where_ha}
+
+                GROUP BY
+                    h.competencia_mes,
+                    h.cod_modalidade
+            ),
+
+            complementar_base AS (
+                SELECT
+                    hp.mes,
+                    hp.ha_proj,
+
+                    COALESCE(
+                        t.cod_modalidade,
+                        mpc.cod_modalidade,
+
+                        CASE
+                            WHEN LEFT(UPPER(TRIM(crs.codigo_sge)), 3) = 'AIB' THEN 12
+                            WHEN LEFT(UPPER(TRIM(crs.codigo_sge)), 3) = 'APP' THEN 10
+                            WHEN LEFT(UPPER(TRIM(crs.codigo_sge)), 3) = 'INP' THEN 9
+                            WHEN LEFT(UPPER(TRIM(crs.codigo_sge)), 3) = 'QPB' THEN 11
+                            WHEN LEFT(UPPER(TRIM(crs.codigo_sge)), 3) = 'PGE' THEN 14
+                            WHEN LEFT(UPPER(TRIM(crs.codigo_sge)), 3) = 'TEC' THEN 15
+                            ELSE NULL
+                        END
+                    ) AS cod_modalidade,
+
+                    t.cod_uo,
+                    t.cod_programa
+
+                FROM ha_previsao_complementar hp
+
+                JOIN turmas t
+                    ON UPPER(TRIM(t.codigo_sge))
+                    = UPPER(TRIM(hp.codigo_sge))
+
+                LEFT JOIN modalidade_por_curso mpc
+                    ON mpc.cod_curso = t.cod_curso
+
+                LEFT JOIN curso crs
+                    ON crs.codigo = t.cod_curso
+
+                WHERE hp.ano = $1
+                AND hp.origem = 'TURMAS_FORA_PREVISAO_20260917'
+            ),
+
+            complementar AS (
+                SELECT
+                    h.mes,
+                    h.cod_modalidade,
+                    SUM(COALESCE(h.ha_proj, 0)) AS valor
+
+                FROM complementar_base h
+
+                JOIN uo u
+                    ON u.codigo = h.cod_uo
+
+                WHERE h.cod_modalidade IS NOT NULL
+                {where_ha}
+
+                GROUP BY
+                    h.mes,
+                    h.cod_modalidade
+            ),
+
+            consolidado AS (
+                SELECT
+                    mes,
+                    cod_modalidade,
+                    valor
+                FROM oficial
+
+                UNION ALL
+
+                SELECT
+                    mes,
+                    cod_modalidade,
+                    valor
+                FROM complementar
+            )
+
             SELECT
-                h.cod_modalidade,
-                h.competencia_mes,
-                SUM(h.ha_total) AS valor
+                cod_modalidade,
+                mes AS competencia_mes,
+                SUM(valor) AS valor
 
-            FROM vw_ha_previsao_resolvida h
-
-            JOIN uo u
-                ON u.codigo = h.cod_uo
-
-            WHERE h.competencia_ano = $1
-            {where_ha}
+            FROM consolidado
 
             GROUP BY
-                h.cod_modalidade,
-                h.competencia_mes
+                cod_modalidade,
+                mes
 
             ORDER BY
-                h.cod_modalidade,
-                h.competencia_mes
-        """
+                cod_modalidade,
+                mes
+            """
 
         async with pool.acquire() as conn:
             rows_ha_garantida = await conn.fetch(
@@ -11865,9 +11996,21 @@ async def performance_preditiva(
             "dez"
         ]
 
+        # ---------------------------------------------------------
+        # ÚLTIMO MÊS EFETIVAMENTE REALIZADO
+        # ---------------------------------------------------------
+        meses_com_realizado = set()
+
+        for item_modalidade in modalidades.values():
+            for registro in item_modalidade["serie"]:
+                if NumberOrZero(registro["realizado"]) > 0:
+                    meses_com_realizado.add(
+                        int(registro["mes"])
+                    )
+
         ultimo_mes_realizado = (
-            max(ids_meses)
-            if ids_meses
+            max(meses_com_realizado)
+            if meses_com_realizado
             else 0
         )
 
@@ -12400,10 +12543,7 @@ async def performance_preditiva(
                 else 0
             )
 
-            if (
-                meta_anual_modalidade <= 0
-                and total > 0
-            ):
+            if meta_anual_modalidade <= 0:
                 status = "sem_meta"
 
             elif percentual >= 100:
@@ -12483,7 +12623,18 @@ async def performance_preditiva(
             idx += 1
 
         sql = f"""
-            WITH RECURSIVE meses AS (
+            WITH RECURSIVE
+
+            lote_contratos_atual AS (
+                SELECT MAX(l.id) AS lote_id
+                FROM importacao_contratos_pf_lotes l
+                WHERE UPPER(COALESCE(l.status, '')) IN (
+                    'PROCESSADO',
+                    'PROCESSADO_COM_ERRO'
+                )
+            ),
+
+            meses AS (
                 SELECT generate_series(1, 12) AS mes
             ),
 
@@ -12503,6 +12654,9 @@ async def performance_preditiva(
 
                 FROM importacao_contratos_pf_linhas l
 
+                JOIN lote_contratos_atual la
+                    ON la.lote_id = l.lote_id
+
                 JOIN turmas t
                     ON TRIM(UPPER(t.codigo_sge))
                     = TRIM(UPPER(l.codturma))
@@ -12510,9 +12664,22 @@ async def performance_preditiva(
                 JOIN uo u
                     ON u.codigo = t.cod_uo
 
-                WHERE l.status IN (
-                    'RESOLVIDO',
-                    'FORA_ESCOPO'
+                WHERE (
+                    l.status IN (
+                        'RESOLVIDO',
+                        'FORA_ESCOPO'
+                    )
+
+                    OR (
+                        UPPER(TRIM(COALESCE(l.status, ''))) = 'ERRO'
+
+                        AND l.valido IS TRUE
+
+                        AND l.processado IS TRUE
+
+                        AND TRIM(COALESCE(l.erro, '')) =
+                            'Turma não encontrada na tabela turmas pelo CODTURMA e possui movimento contratual.'
+                    )
                 )
 
                 AND NOT (
@@ -12761,21 +12928,31 @@ async def performance_preditiva(
         return resultado
 
     async def buscar_receita_contratada(serie_receita):
-        # Primeiro mês selecionado em que a receita realizada está zerada
-        previsao_receita = calcular_previsao(serie_receita)
+        # =====================================================
+        # RECEITA GARANTIDA
+        #
+        # Não utiliza previsão estatística.
+        # A receita contratada começa no mês seguinte ao último
+        # mês que possui receita realizada.
+        # =====================================================
 
-        meses_com_previsao = [
-            i + 1
-            for i, v in enumerate(previsao_receita)
-            if v is not None
+        meses_com_realizado = [
+            int(r["mes"])
+            for r in serie_receita
+            if NumberOrZero(r["realizado"]) > 0
         ]
 
-        if not meses_com_previsao:
+        if not meses_com_realizado:
             return [0] * 12
 
-        primeiro_mes_zerado = min(meses_com_previsao)
+        ultimo_mes_realizado = max(meses_com_realizado)
 
-        params = [ano, primeiro_mes_zerado]
+        primeiro_mes_sem_realizado = ultimo_mes_realizado + 1
+
+        if primeiro_mes_sem_realizado > 12:
+            return [0] * 12
+
+        params = [ano, primeiro_mes_sem_realizado]
         idx = 3
 
         filtro_sub = ""
@@ -12806,9 +12983,21 @@ async def performance_preditiva(
             idx += 1
 
         sql = f"""
-        WITH RECURSIVE meses AS (
+        WITH RECURSIVE
+
+        lote_contratos_atual AS (
+            SELECT MAX(l.id) AS lote_id
+            FROM importacao_contratos_pf_lotes l
+            WHERE UPPER(COALESCE(l.status, '')) IN (
+                'PROCESSADO',
+                'PROCESSADO_COM_ERRO'
+            )
+        ),
+
+        meses AS (
             SELECT generate_series(1, 12) AS mes
         ),
+
         base AS (
             SELECT
                 l.codturma,
@@ -12823,11 +13012,30 @@ async def performance_preditiva(
                 u.cod_subregiao,
                 t.cod_programa
             FROM importacao_contratos_pf_linhas l
+
+            JOIN lote_contratos_atual la
+            ON la.lote_id = l.lote_id
+
             JOIN turmas t
             ON TRIM(UPPER(t.codigo_sge)) = TRIM(UPPER(l.codturma))
+
             JOIN uo u
             ON u.codigo = t.cod_uo
-            WHERE l.status IN ('RESOLVIDO', 'FORA_ESCOPO')
+
+            WHERE (
+                l.status IN ('RESOLVIDO', 'FORA_ESCOPO')
+
+                OR (
+                    UPPER(TRIM(COALESCE(l.status, ''))) = 'ERRO'
+
+                    AND l.valido IS TRUE
+
+                    AND l.processado IS TRUE
+
+                    AND TRIM(COALESCE(l.erro, '')) =
+                        'Turma não encontrada na tabela turmas pelo CODTURMA e possui movimento contratual.'
+                )
+            )
 
             AND NOT (
                 t.cod_modalidade = 15
@@ -13034,45 +13242,133 @@ async def performance_preditiva(
             )
 
         sql = f"""
-        WITH meses AS (
-            SELECT generate_series(1, 12) AS mes
-        ),
+            WITH meses AS (
+                SELECT generate_series(1, 12) AS mes
+            ),
 
-        ha_futura AS (
+            -- =====================================================
+            -- PREVISÃO OFICIAL
+            -- Recupera também turmas que não existem em "turmas"
+            -- usando CR + filial como fallback.
+            -- =====================================================
+            oficial AS (
+                SELECT
+                    a.competencia_ano AS ano,
+                    a.competencia_mes AS mes,
+                    UPPER(TRIM(a.turma)) AS codigo_sge,
+                    SUM(COALESCE(a.ha_total, 0)) AS ha,
+
+                    COALESCE(
+                        t.cod_uo,
+                        u_fallback.codigo
+                    ) AS cod_uo,
+
+                    COALESCE(
+                        t.cod_programa,
+                        cp.cod_programa
+                    ) AS cod_programa
+
+                FROM vw_ha_previsao_atual a
+
+                LEFT JOIN turmas t
+                    ON UPPER(TRIM(t.codigo_sge))
+                    = UPPER(TRIM(a.turma))
+
+                LEFT JOIN cr_planejamento cp
+                    ON t.codigo IS NULL
+                AND TRIM(cp.cr) = TRIM(a.item_contabil)
+
+                LEFT JOIN uo u_fallback
+                    ON t.codigo IS NULL
+                AND TRIM(u_fallback.codigo_sge::text)
+                    = TRIM(a.codfilial)
+
+                WHERE a.competencia_ano = $1
+
+                GROUP BY
+                    a.competencia_ano,
+                    a.competencia_mes,
+                    UPPER(TRIM(a.turma)),
+                    COALESCE(t.cod_uo, u_fallback.codigo),
+                    COALESCE(t.cod_programa, cp.cod_programa)
+            ),
+
+            -- =====================================================
+            -- PREVISÃO COMPLEMENTAR
+            -- Todas as turmas complementares já foram validadas
+            -- e possuem correspondência em "turmas".
+            -- =====================================================
+            complementar AS (
+                SELECT
+                    c.ano,
+                    c.mes,
+                    UPPER(TRIM(c.codigo_sge)) AS codigo_sge,
+                    SUM(COALESCE(c.ha_proj, 0)) AS ha,
+                    t.cod_uo,
+                    t.cod_programa
+
+                FROM ha_previsao_complementar c
+
+                JOIN turmas t
+                    ON UPPER(TRIM(t.codigo_sge))
+                    = UPPER(TRIM(c.codigo_sge))
+
+                WHERE c.ano = $1
+                AND c.origem = 'TURMAS_FORA_PREVISAO_20260917'
+
+                GROUP BY
+                    c.ano,
+                    c.mes,
+                    UPPER(TRIM(c.codigo_sge)),
+                    t.cod_uo,
+                    t.cod_programa
+            ),
+
+            -- =====================================================
+            -- BASE CONSOLIDADA E RESOLVIDA
+            -- =====================================================
+            h AS (
+                SELECT * FROM oficial
+
+                UNION ALL
+
+                SELECT * FROM complementar
+            ),
+
+            ha_futura AS (
+                SELECT
+                    h.mes,
+                    COALESCE(
+                        SUM(h.ha),
+                        0
+                    ) AS valor
+
+                FROM h
+
+                JOIN uo u
+                    ON u.codigo = h.cod_uo
+
+                WHERE h.ano = $1
+                {where_extra}
+
+                GROUP BY h.mes
+            )
+
             SELECT
-                h.competencia_mes AS mes,
+                m.mes,
 
                 COALESCE(
-                    SUM(h.ha_total),
+                    hf.valor,
                     0
                 ) AS valor
 
-            FROM vw_ha_previsao_resolvida h
+            FROM meses m
 
-            JOIN uo u
-                ON u.codigo = h.cod_uo
+            LEFT JOIN ha_futura hf
+                ON hf.mes = m.mes
 
-            WHERE h.competencia_ano = $1
-            {where_extra}
-
-            GROUP BY h.competencia_mes
-        )
-
-        SELECT
-            m.mes,
-
-            COALESCE(
-                hf.valor,
-                0
-            ) AS valor
-
-        FROM meses m
-
-        LEFT JOIN ha_futura hf
-            ON hf.mes = m.mes
-
-        ORDER BY m.mes
-        """
+            ORDER BY m.mes
+            """
 
         async with pool.acquire() as conn:
             rows = await conn.fetch(
@@ -13105,10 +13401,9 @@ async def performance_preditiva(
 
         if indicador == "matriculas":
 
-            # Para Matrículas:
+            # Matrículas:
             # - meses realizados permanecem sem previsão;
-            # - meses futuros passam a utilizar diretamente
-            #   a META MENSAL cadastrada no planejamento.
+            # - meses futuros utilizam a META MENSAL.
             previsao = []
 
             for r in serie:
@@ -13121,10 +13416,21 @@ async def performance_preditiva(
                         round(r["meta"], 2)
                     )
 
+        elif indicador == "receita":
+
+            # Receita:
+            # não utiliza previsão estatística.
+            #
+            # O fechamento previsto será composto por:
+            # receita realizada + receita contratada/garantida.
+            previsao = [None] * 12
+
         else:
 
-            # Hora-Aluno e Receita mantêm
-            # a lógica de previsão existente.
+            # Hora-Aluno:
+            # mantém a estrutura existente.
+            # Posteriormente os meses futuros são substituídos
+            # pela HA garantida.
             previsao = calcular_previsao(serie)
 
         return {
@@ -13883,13 +14189,20 @@ async def modalidades_summary(
     proj_total AS (
         SELECT
             COALESCE(SUM(pp.matriculas_proj), 0) AS mat_proj,
-            COALESCE(SUM(pp.ha_proj), 0) AS ha_proj,
             COALESCE(SUM(pp.receita_proj), 0) AS rec_proj
         FROM ofertas_filtradas of
         LEFT JOIN projetado_programas pp
             ON pp.cod_oferta = of.cod_oferta
         AND pp.ano = $1
         AND pp.mes = ANY($2::int[])
+    ),
+
+    ha_proj_total AS (
+        SELECT
+            COALESCE(SUM(v.ha), 0) AS ha_proj
+        FROM vw_ha_previsao_consolidada v
+        WHERE v.ano = $1
+        AND v.mes = ANY($2::int[])
     ),
 
     real_total AS (
@@ -13925,7 +14238,7 @@ async def modalidades_summary(
         rt.mat_real,
 
         mt.ha_meta,
-        pt.ha_proj,
+        hpt.ha_proj,
         rt.ha_real,
 
         mt.rec_meta,
@@ -13933,6 +14246,7 @@ async def modalidades_summary(
         rt.rec_real
     FROM meta_total mt
     CROSS JOIN proj_total pt
+    CROSS JOIN ha_proj_total hpt
     CROSS JOIN real_total rt
     """
 
